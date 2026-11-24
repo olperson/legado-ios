@@ -384,6 +384,24 @@ final class ReaderScrollGestureTests: XCTestCase {
         try exercisePagedReading(mode: "0", fontSize: "40")
     }
 
+    func testCoverDragCancelsShortMovementAndTurnsInBothDirections() {
+        let (app, body, page) = launchPagedReader(mode: "0", fontSize: "28")
+        let chapter = body.value as? String
+        func drag(from startX: CGFloat, to endX: CGFloat, expectedPage: Int) {
+            let start = body.coordinate(withNormalizedOffset: CGVector(dx: startX, dy: 0.5))
+            let end = body.coordinate(withNormalizedOffset: CGVector(dx: endX, dy: 0.5))
+            start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.25)
+            let settled = expectation(for: NSPredicate(format: "label BEGINSWITH %@", "\(expectedPage)/"),
+                                      evaluatedWith: page)
+            wait(for: [settled], timeout: 5)
+            XCTAssertEqual(body.value as? String, chapter)
+            XCTAssertFalse(app.buttons["目录"].exists)
+        }
+        drag(from: 0.75, to: 0.65, expectedPage: 1)
+        drag(from: 0.85, to: 0.15, expectedPage: 2)
+        drag(from: 0.15, to: 0.85, expectedPage: 1)
+    }
+
     func testCoverTapAcrossChapterBoundaryShowsHeadingOnFirstPage() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -441,7 +459,7 @@ final class ReaderScrollGestureTests: XCTestCase {
         try checkChapterHeading()
     }
 
-    private func exercisePagedReading(mode: String, fontSize: String) throws {
+    private func launchPagedReader(mode: String, fontSize: String) -> (XCUIApplication, XCUIElement, XCUIElement) {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiScrollRegression", "-uiPagingDiagnostics", "-pageAnim", mode, "-themeMode", "1", "-tipFooterRight", "6", "-textSize", fontSize]
@@ -455,6 +473,11 @@ final class ReaderScrollGestureTests: XCTestCase {
             return page.exists && page.label.hasPrefix("1/") && total > 1
         }, evaluatedWith: nil)
         wait(for: [ready], timeout: 10)
+        return (app, body, page)
+    }
+
+    private func exercisePagedReading(mode: String, fontSize: String) throws {
+        let (app, body, page) = launchPagedReader(mode: mode, fontSize: fontSize)
         let chapter = body.value as? String
         let viewport = body.frame
         attachScreenshot(app)

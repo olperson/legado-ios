@@ -125,6 +125,60 @@ final class ReaderPagingGeometryTests: XCTestCase {
         XCTAssertTrue(mask.intersection(view.bounds).contains(heading))
     }
 
+    func testCoverDragTracksTheFingerAndSettlesInBothDirections() async throws {
+        let text = String(repeating: "分页阅读时，拖动中的页面应该跟随手指。\n", count: 100)
+        var currentPage = 1
+        let reader = pagedReader(text: text, title: "第一章", animation: 0,
+                                 currentPage: Binding(get: { currentPage }, set: { currentPage = $0 }))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let host = UIHostingController(rootView: reader)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        host.view.layoutIfNeeded()
+        await Task.yield()
+
+        let view = try XCTUnwrap(findTextView(host.view))
+        let coordinator = try XCTUnwrap(view.delegate as? ReaderTextView.Coordinator)
+        defer { coordinator.invalidate() }
+        let pages = ReaderTextPage.layout(in: view, height: view.bounds.height - 32)
+        guard pages.count >= 2 else { return XCTFail("Expected at least two pages in the test chapter") }
+        let width = view.bounds.width
+        let gestures = view.gestureRecognizers ?? []
+        XCTAssertTrue(gestures.contains { $0 is UIPanGestureRecognizer && $0 !== view.panGestureRecognizer && $0.isEnabled })
+        XCTAssertFalse(gestures.contains { $0 is UISwipeGestureRecognizer && $0.isEnabled })
+
+        @MainActor
+        func drag(from page: Int, by distance: CGFloat, end: UIGestureRecognizer.State,
+                  expectedPage: Int) async throws {
+            let sign: CGFloat = distance < 0 ? -1 : 1
+            coordinator.handleCoverPan(.began, translationX: 8 * sign, velocityX: 0)
+            coordinator.handleCoverPan(.changed, translationX: width * 0.4 * sign, velocityX: 0)
+            let overlay = try XCTUnwrap(view.superview?.subviews.compactMap { $0 as? ReaderCoverView }.first)
+            let startX = sign < 0 ? 0 : -width
+            XCTAssertEqual(overlay.movingPage.frame.minX, startX + width * 0.4 * sign, accuracy: 1)
+            coordinator.handleCoverPan(.changed, translationX: distance, velocityX: 0)
+            XCTAssertEqual(overlay.movingPage.frame.minX, startX + distance, accuracy: 1)
+            XCTAssertEqual(view.contentOffset.y, pages[page - 1].offset, accuracy: 0.5)
+            XCTAssertEqual(currentPage, page)
+
+            coordinator.handleCoverPan(end, translationX: distance, velocityX: 0)
+            for _ in 0..<100 {
+                if overlay.superview == nil && currentPage == expectedPage { break }
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            XCTAssertNil(overlay.superview)
+            XCTAssertEqual(view.contentOffset.y, pages[expectedPage - 1].offset, accuracy: 0.5)
+            XCTAssertEqual(currentPage, expectedPage)
+        }
+
+        // Retreating before release and system cancellation both keep the original page.
+        try await drag(from: 1, by: -width * 0.06, end: .ended, expectedPage: 1)
+        try await drag(from: 1, by: -width * 0.75, end: .cancelled, expectedPage: 1)
+        try await drag(from: 1, by: -width * 0.75, end: .ended, expectedPage: 2)
+        try await drag(from: 2, by: width * 0.75, end: .ended, expectedPage: 1)
+    }
+
     private func findTextView(_ view: UIView) -> UITextView? {
         (view as? UITextView) ?? view.subviews.lazy.compactMap(findTextView).first
     }

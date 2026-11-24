@@ -706,6 +706,15 @@ final class ReaderViewModel: ObservableObject {
         return book
     }
 
+    func coverChapterPreview(direction: Int) -> (title: String, text: String)? {
+        guard let index = navigationIndex(direction: direction) else { return nil }
+        let chapter = chapters[index]
+        if let prepared = preparedContent(for: chapter) {
+            return (prepared.body.title, prepared.body.content)
+        }
+        return (chapter.title, demoChapterContent ?? "")
+    }
+
     func goPrevious(position: Int = 0) { if let value = navigationIndex(direction: -1) { select(index: value, position: position) } }
     func goNext(position: Int = 0) { if let value = navigationIndex(direction: 1) { select(index: value, position: position) } }
 

@@ -762,7 +762,8 @@ struct ReaderView: View {
             onPageChanged: pageDidChange,
             onTapAction: handleTapAction,
             holdsDisplayedPage: waitingForChapter,
-            chapterGeneration: model.displayedChapterGeneration
+            chapterGeneration: model.displayedChapterGeneration,
+            coverChapterPreview: { model.coverChapterPreview(direction: $0) }
         )
     }
 
