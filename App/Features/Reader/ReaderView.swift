@@ -1010,6 +1010,7 @@ struct ReaderView: View {
     private var readerBottomChrome: some View {
         VStack(spacing: 12) {
             readerChapterControls
+            readerFontControls
             Rectangle().fill(Color(uiColor: .separator).opacity(0.35)).frame(height: 0.5)
             LazyVGrid(columns: readerToolbarColumns, spacing: 12) {
                 readerChromeAction("list.bullet", "目录") {
@@ -1062,6 +1063,23 @@ struct ReaderView: View {
             readerChromeIconButton("chevron.right", label: "下一章") { moveChapter(1) }
                 .disabled(!model.canGoNext)
                 .opacity(model.canGoNext ? 1 : 0.25)
+        }
+    }
+
+    private var readerFontControls: some View {
+        HStack(spacing: 6) {
+            readerChromeIconButton("textformat.size.smaller", label: "减小字号") { fontSize = max(5, fontSize - 1) }
+                .disabled(fontSize <= 5)
+            VStack(spacing: 1) {
+                Text("字号").font(.caption).foregroundStyle(.secondary)
+                Text("\(Int(fontSize))").font(.headline.monospacedDigit())
+            }
+            readerChromeIconButton("textformat.size.larger", label: "增大字号") { fontSize = min(50, fontSize + 1) }
+                .disabled(fontSize >= 50)
+            Spacer(minLength: 4)
+            ReaderTextColorPicker(theme: theme, isEInk: themeMode == "3")
+                .font(.subheadline)
+                .fixedSize(horizontal: true, vertical: false)
         }
     }
 
@@ -1237,32 +1255,8 @@ struct ReaderView: View {
         ReadingNavigationStack {
             Form {
                 Section("快速排版") {
-                    HStack(spacing: 12) {
-                        Button {
-                            fontSize = max(5, fontSize - 1)
-                        } label: {
-                            Image(systemName: "textformat.size.smaller")
-                                .frame(width: 38, height: 32)
-                        }
-                        .readingSecondaryButtonStyle()
-
-                        VStack(spacing: 2) {
-                            Text("字号")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text("\(Int(fontSize))")
-                                .font(.headline.monospacedDigit())
-                        }
-                        .frame(maxWidth: .infinity)
-
-                        Button {
-                            fontSize = min(50, fontSize + 1)
-                        } label: {
-                            Image(systemName: "textformat.size.larger")
-                                .frame(width: 38, height: 32)
-                        }
-                        .readingSecondaryButtonStyle()
-                    }
+                    readerFontControls
+                    ReaderTextColorReset(theme: theme, isEInk: themeMode == "3")
 
                     HStack(spacing: 8) {
                         Text("行距")
@@ -1273,7 +1267,6 @@ struct ReaderView: View {
                         readerChoiceChip("宽松", selected: lineSpacing >= 18) { lineSpacing = 22 }
                     }
                     Toggle("两端对齐", isOn: $fullJustify)
-                    ReaderTextColorControls(theme: theme, isEInk: themeMode == "3")
                 }
 
                 Section("阅读背景") {

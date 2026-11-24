@@ -250,6 +250,7 @@ struct EPUBReaderView: View {
     @State private var sliderProgress = 0.0
     @State private var isScrubbing = false
     @State private var saveTask: Task<Void, Never>?
+    private static let fontScaleRange = 0.7...2.0
     @AppStorage("epubFontScale") private var fontScale = 1.0
     @AppStorage("epubScroll") private var scroll = false
     @AppStorage("epubPublisherStyles") private var publisherStyles = true
@@ -265,6 +266,8 @@ struct EPUBReaderView: View {
     }
 
     private var isEInk: Bool { themeMode == "3" }
+    private var isFixedLayout: Bool { model.navigator?.publication.metadata.layout == .fixed }
+    private var fontScalePercent: Int { Int((fontScale * 100).rounded()) }
 
     private var effectiveTheme: ReadiumNavigator.Theme {
         if isEInk { return .light }
@@ -399,6 +402,19 @@ struct EPUBReaderView: View {
                     .font(.caption.monospacedDigit()).frame(width: 42)
             }
             .frame(minHeight: 44)
+            if !isFixedLayout {
+                HStack(spacing: 12) {
+                    Stepper(value: $fontScale, in: Self.fontScaleRange, step: 0.1) {
+                        Text("字号 \(fontScalePercent)%").monospacedDigit()
+                    }
+                    .accessibilityIdentifier("reader.epub.quickFontSize")
+                    ReaderTextColorPicker(theme: colorPreset.id, isEInk: isEInk,
+                                          defaultForeground: effectiveTheme.contentColor.uiColor)
+                        .fixedSize()
+                }
+                .font(.subheadline)
+                .frame(minHeight: 44)
+            }
             HStack {
                 Button { Task { _ = await model.navigator?.goBackward() } } label: { Image(systemName: "chevron.left") }
                     .accessibilityLabel("上一页")
@@ -465,10 +481,6 @@ struct EPUBReaderView: View {
                     Toggle("滚动阅读", isOn: $scroll)
                     Toggle("使用原书排版", isOn: $publisherStyles)
                 }
-                Section("字号") {
-                    Slider(value: $fontScale, in: 0.7...2.0, step: 0.1)
-                    Text("\(Int(fontScale * 100))%")
-                }
                 Section("背景") {
                     Picker("主题", selection: $theme) {
                         Text("跟随系统").tag("system")
@@ -477,11 +489,14 @@ struct EPUBReaderView: View {
                         Text("夜间").tag("dark")
                     }
                 }
-                Section("文字颜色 · \(colorPreset.name)") {
-                    if model.navigator?.publication.metadata.layout == .fixed {
-                        Text("这本书使用固定版式，文字颜色由原书决定。")
+                Section("字号与字体颜色 · \(colorPreset.name)") {
+                    if isFixedLayout {
+                        Text("这本书使用固定版式，字号和文字颜色由原书决定。")
                             .foregroundStyle(.secondary)
                     } else {
+                        Slider(value: $fontScale, in: Self.fontScaleRange, step: 0.1)
+                            .accessibilityLabel("字号")
+                        Text("\(fontScalePercent)%")
                         ReaderTextColorControls(theme: colorPreset.id, isEInk: isEInk,
                                                 defaultForeground: effectiveTheme.contentColor.uiColor)
                     }

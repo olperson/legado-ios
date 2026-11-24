@@ -4,6 +4,27 @@ import Vision
 
 @MainActor
 final class ReaderScrollGestureTests: XCTestCase {
+    func testCenterTapOpensFontColorPickerBesideFontSize() throws {
+        continueAfterFailure = false
+        for mode in ["0", "3"] {
+            let app = XCUIApplication()
+            app.launchArguments = ["-uiDemo", "-uiDemoReader", "-pageAnim", mode, "-themeMode", "1",
+                                   "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+            app.launch()
+            let reader = mode == "3" ? app.collectionViews["reader.continuous"] : app.textViews["reader.text"]
+            XCTAssertTrue(reader.waitForExistence(timeout: 20))
+            reader.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            let picker = app.descendants(matching: .any).matching(identifier: "reader.textColor").firstMatch
+            XCTAssertTrue(picker.waitForExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["减小字号"].isHittable && app.buttons["增大字号"].isHittable)
+            XCTAssertFalse(app.navigationBars["阅读样式"].exists)
+            picker.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+            let spectrum = app.descendants(matching: .any).matching(NSPredicate(format: "label IN %@", ["Spectrum", "光谱"])).firstMatch
+            XCTAssertTrue(spectrum.waitForExistence(timeout: 5), "System color picker should open from the reading menu")
+            app.terminate()
+        }
+    }
+
     func testComicImagesLoadInOrderAndFailedImageCanRetry() throws {
         continueAfterFailure = false
         let app = XCUIApplication()

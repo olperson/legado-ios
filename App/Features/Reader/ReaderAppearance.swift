@@ -97,6 +97,17 @@ struct ReaderTextColors: RawRepresentable, Equatable {
 struct ReaderTextColorControls: View {
     let theme: String
     let isEInk: Bool
+    var defaultForeground: UIColor? = nil
+
+    var body: some View {
+        ReaderTextColorPicker(theme: theme, isEInk: isEInk, defaultForeground: defaultForeground)
+        ReaderTextColorReset(theme: theme, isEInk: isEInk)
+    }
+}
+
+struct ReaderTextColorPicker: View {
+    let theme: String
+    let isEInk: Bool
     let defaultForeground: UIColor?
     @AppStorage(ReaderTextColors.storageKey) private var colors = ReaderTextColors()
 
@@ -116,8 +127,17 @@ struct ReaderTextColorControls: View {
         ), supportsOpacity: false)
         .disabled(isEInk)
         .accessibilityIdentifier("reader.textColor")
+    }
+}
+
+struct ReaderTextColorReset: View {
+    let theme: String
+    let isEInk: Bool
+    @AppStorage(ReaderTextColors.storageKey) private var colors = ReaderTextColors()
+
+    var body: some View {
         Button("恢复主题默认字体颜色") { colors.resetForeground(for: theme) }
-            .disabled(isEInk || custom == nil)
+            .disabled(isEInk || colors.customForeground(for: theme) == nil)
             .accessibilityIdentifier("reader.resetTextColor")
         if isEInk {
             Text("E-Ink 模式使用黑色文字。")
