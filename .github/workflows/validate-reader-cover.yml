@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: reader-cover-main
+  cancel-in-progress: true
+
 jobs:
   cover:
     runs-on: macos-15-intel

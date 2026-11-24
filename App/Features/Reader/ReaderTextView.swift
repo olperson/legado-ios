@@ -146,6 +146,9 @@ final class ReaderCoverView: UIView {
         isUserInteractionEnabled = false
         accessibilityElementsHidden = true
         clipsToBounds = true
+        // The strip changes width on every drag sample. Keep its hosted page
+        // at canvas size so the revealed footer and wallpaper stay stationary.
+        exposedStrip.autoresizesSubviews = false
         exposedStrip.clipsToBounds = true
         addSubview(exposedStrip)
         exposedStrip.addSubview(stationaryPage)
