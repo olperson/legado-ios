@@ -82,18 +82,31 @@ struct ReaderCoverCanvas: UIViewControllerRepresentable {
                      direction: Int, targetOffset: CGFloat?) -> ReaderCoverView? {
             guard let sheet, let window = view.window, window === textView.window,
                   !view.bounds.isEmpty else { return nil }
+            view.layoutIfNeeded()
+            // Layout can report this initial size again after the hosted sheets appear.
+            lastSize = view.bounds.size
             let textFrame = textView.convert(textView.bounds, to: view)
-            let hosts = [current, adjacent].map { page in
-                UIHostingController(rootView: sheet(page, textFrame).ignoresSafeArea())
-            }
-            for host in hosts {
+            func makeSheet(_ page: ReaderCoverPage) -> UIView {
+                let content = sheet(page, textFrame)
+                    .frame(width: view.bounds.width, height: view.bounds.height)
+                    .environment(\.displayScale, window.screen.scale)
+                    .ignoresSafeArea()
+                if #available(iOS 16.0, *) {
+                    // Freeze the complete page before the first drag frame. Its metadata and
+                    // safe-area layout must stay fixed even while the next chapter loads.
+                    let renderer = ImageRenderer(content: content)
+                    renderer.scale = window.screen.scale
+                    if let image = renderer.uiImage { return UIImageView(image: image) }
+                }
+                let host = UIHostingController(rootView: content)
                 addChild(host)
                 host.view.backgroundColor = .clear
+                return host.view
             }
-            let overlay = ReaderCoverView(frame: view.bounds, current: hosts[0].view, adjacent: hosts[1].view,
+            let overlay = ReaderCoverView(frame: view.bounds, current: makeSheet(current), adjacent: makeSheet(adjacent),
                                           direction: direction, targetOffset: targetOffset)
             view.addSubview(overlay)
-            for host in hosts {
+            for host in children {
                 host.didMove(toParent: self)
                 host.view.setNeedsLayout()
                 host.view.layoutIfNeeded()

@@ -199,13 +199,20 @@ final class ReaderPagingGeometryTests: XCTestCase {
             }
         }
         .ignoresSafeArea()
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive })
+        let previousKeyWindow = scene.windows.first(where: { $0.isKeyWindow })
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
         let host = UIHostingController(rootView: root)
         window.rootViewController = host
         window.makeKeyAndVisible()
-        defer { window.isHidden = true }
-        host.view.layoutIfNeeded()
-        await Task.yield()
+        defer {
+            window.isHidden = true
+            previousKeyWindow?.makeKey()
+        }
+        window.layoutIfNeeded()
+        try await Task.sleep(nanoseconds: 100_000_000)
         let view = try XCTUnwrap(findTextView(host.view))
         let coordinator = try XCTUnwrap(view.delegate as? ReaderTextView.Coordinator)
         defer { coordinator.invalidate() }
@@ -213,12 +220,15 @@ final class ReaderPagingGeometryTests: XCTestCase {
         let size = host.view.bounds.size
         let context = CIContext()
         let space = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
-        func snapshot() throws -> CIImage {
+        func snapshot(_ target: UIView, _ name: String) throws -> CIImage {
             let format = UIGraphicsImageRendererFormat()
             format.scale = 1
-            let image = UIGraphicsImageRenderer(size: size, format: format).image { _ in
-                XCTAssertTrue(host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true))
+            let image = UIGraphicsImageRenderer(size: target.bounds.size, format: format).image { _ in
+                XCTAssertTrue(target.drawHierarchy(in: target.bounds, afterScreenUpdates: true))
             }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = name
+            add(attachment)
             return CIImage(cgImage: try XCTUnwrap(image.cgImage))
         }
         func pixel(_ image: CIImage, _ x: CGFloat, _ y: CGFloat) -> [UInt8] {
@@ -231,23 +241,42 @@ final class ReaderPagingGeometryTests: XCTestCase {
             }
             return rgba
         }
-        let original = try snapshot()
+        let original = try snapshot(window, "Original window")
         coordinator.handleCoverPan(.began, translationX: -8, velocityX: 0)
         coordinator.handleCoverPan(.changed, translationX: -size.width / 2, velocityX: 0)
         let cover = try XCTUnwrap(findCoverView(host.view))
-        XCTAssertEqual(cover.convert(cover.bounds, to: host.view), host.view.bounds)
-        let dragging = try snapshot()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(cover.window === window)
+        XCTAssertEqual(cover.convert(cover.bounds, to: window), window.bounds)
+        XCTAssertTrue(cover.movingPage.isDescendant(of: cover))
+        XCTAssertTrue(cover.movingPage.window === window)
+        XCTAssertEqual(cover.movingPage.frame.minX, -size.width / 2, accuracy: 1)
+        let presentedX = cover.movingPage.layer.presentation()?.frame.minX
+        var hierarchy: [String] = []
+        var ancestor: UIView? = cover.movingPage
+        while let view = ancestor {
+            hierarchy.append("\(type(of: view)) frame=\(view.frame) hidden=\(view.isHidden) alpha=\(view.alpha) presentedOpacity=\(String(describing: view.layer.presentation()?.opacity))")
+            ancestor = view.superview
+        }
+        let hierarchyAttachment = XCTAttachment(string: hierarchy.joined(separator: "\n"))
+        hierarchyAttachment.name = "Half-drag view hierarchy"
+        add(hierarchyAttachment)
+        let overlayPixels = try snapshot(cover, "Half-drag overlay")
+        let dragging = try snapshot(window, "Half-drag window")
+        XCTAssertTrue(cover.window === window)
         // The header, patterned wallpaper and footer must travel with the outgoing page.
         for y in [CGFloat(0.1), 0.2, 0.9] {
             XCTAssertNotEqual(pixel(original, 0.25, y), pixel(original, 0.75, y))
-            XCTAssertEqual(pixel(dragging, 0.25, y), pixel(original, 0.75, y))
+            XCTAssertEqual(pixel(dragging, 0.25, y), pixel(original, 0.75, y),
+                           "Half-drag y=\(y), overlay pixel=\(pixel(overlayPixels, 0.25, y)), presented x=\(String(describing: presentedX))")
         }
         XCTAssertEqual(pixel(dragging, 0.75, 0.9), [0, 255, 0, 255],
-                       "The exposed footer must show the green destination marker")
+                       "The exposed footer must show the green destination marker. Overlay pixel=\(pixel(overlayPixels, 0.75, 0.9))")
         coordinator.handleCoverPan(.cancelled, translationX: -size.width / 2, velocityX: 0)
         for _ in 0..<100 where cover.superview != nil { try await Task.sleep(nanoseconds: 20_000_000) }
         XCTAssertNil(cover.superview)
-        let restored = try snapshot()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let restored = try snapshot(window, "Window after cancellation")
         for y in [CGFloat(0.1), 0.2, 0.9] {
             for x in [CGFloat(0.25), 0.75] {
                 XCTAssertEqual(pixel(restored, x, y), pixel(original, x, y))
