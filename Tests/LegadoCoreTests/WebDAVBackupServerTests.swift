@@ -17,22 +17,33 @@ struct WebDAVBackupServerTests {
         let firstData = head + Data(repeating: 0x61, count: 1_500_000)
         let secondData = head + Data(repeating: 0x62, count: 3_000_000)
         try firstData.write(to: local)
-        let first = try await client.uploadBackup(from: local)
+        let first = try await step("upload first ZIP, \(firstData.count) bytes") { try await client.uploadBackup(from: local) }
         let legacy = Data(#"{"version":1,"books":[]}"#.utf8)
-        try await client.upload(legacy, replacing: nil)
+        try await step("upload legacy JSON") { try await client.upload(legacy, replacing: nil) }
         try secondData.write(to: local)
-        let second = try await client.uploadBackup(from: local)
+        let second = try await step("upload second ZIP, \(secondData.count) bytes") { try await client.uploadBackup(from: local) }
 
-        let list = try await client.listBackups()
+        let list = try await step("list backups") { try await client.listBackups() }
         let archives = list.filter { !$0.isLegacySnapshot }
         #expect(archives.map(\.name) == [second.name, first.name])
         #expect(archives.map(\.size) == [Int64(secondData.count), Int64(firstData.count)])
         let legacyFile = try #require(list.first { $0.isLegacySnapshot })
         for (file, content) in zip(archives + [legacyFile], [secondData, firstData, legacy]) {
             let downloaded = folder.appendingPathComponent(file.name)
-            try await client.downloadBackup(file, to: downloaded)
+            try await step("download \(file.name), expected \(content.count) bytes") {
+                try await client.downloadBackup(file, to: downloaded)
+            }
             let received = try Data(contentsOf: downloaded)
             #expect(received == content)
         }
+    }
+
+    private func step<T>(_ name: String, operation: () async throws -> T) async throws -> T {
+        do { return try await operation() }
+        catch { throw TransferFailure(description: "\(name): \(error)") }
+    }
+
+    private struct TransferFailure: Error, CustomStringConvertible {
+        let description: String
     }
 }

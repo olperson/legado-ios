@@ -30,6 +30,7 @@ public enum WebDAVSyncDirection: Equatable, Sendable {
 public enum WebDAVSyncError: LocalizedError, Equatable {
     case invalidDirectory, invalidUsername, unauthorized, forbidden, missingDirectory
     case redirected, remoteChanged, missingStrongETag, unexpectedResponse
+    case incompleteBackup(expected: Int64, received: UInt64)
     case httpStatus(Int)
 
     public var errorDescription: String? {
@@ -43,6 +44,7 @@ public enum WebDAVSyncError: LocalizedError, Equatable {
         case .remoteChanged: "云端文件已发生变化，请重新同步。"
         case .missingStrongETag: "服务器未提供可用于安全覆盖的强 ETag。请稍后重试，也可以从云端下载。"
         case .unexpectedResponse: "服务器返回了意外内容，请检查 WebDAV 目录地址。"
+        case .incompleteBackup(let expected, let received): "下载文件长度与备份不一致（预期 \(expected) 字节，实际 \(received) 字节），请刷新备份列表后重试。"
         case .httpStatus(let code): "WebDAV 请求失败（HTTP \(code)）。"
         }
     }
@@ -150,15 +152,20 @@ public final class WebDAVSync: Sendable {
         }
     }
 
-    public func listBackups(includeOtherArchives: Bool = false) async throws -> [WebDAVBackupFile] {
+    private func directoryQuery(depth: Int) -> URLRequest {
         var query = request(method: "PROPFIND", url: directoryURL)
-        query.setValue("1", forHTTPHeaderField: "Depth")
+        query.setValue(String(depth), forHTTPHeaderField: "Depth")
         query.setValue("application/xml", forHTTPHeaderField: "Accept")
         query.setValue("application/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
         query.httpBody = Data("""
             <D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:getlastmodified/>
             <D:getcontentlength/><D:getetag/><D:creationdate/></D:prop></D:propfind>
             """.utf8)
+        return query
+    }
+
+    public func listBackups(includeOtherArchives: Bool = false) async throws -> [WebDAVBackupFile] {
+        let query = directoryQuery(depth: 1)
         let (xml, response) = try await creatingDirectoryIfMissing { try await send(query) }
         guard response.statusCode == 207 else { throw Self.error(response) }
         let entries = try WebDAVListing.parse(xml)
@@ -179,7 +186,7 @@ public final class WebDAVSync: Sendable {
             let date = created ?? modified ?? creationDate ?? .distantPast
             files[name] = WebDAVBackupFile(name: name, date: date,
                                            size: entry.properties["getcontentlength"].flatMap(Int64.init),
-                                           etag: entry.properties["getetag"], modified: modified.map(httpDate.string(from:)))
+                                           etag: entry.properties["getetag"].flatMap(Self.listedETag), modified: modified.map(httpDate.string(from:)))
         }
         return files.values.sorted { $0.date == $1.date ? $0.name > $1.name : $0.date > $1.date }
     }
@@ -194,7 +201,18 @@ public final class WebDAVSync: Sendable {
         let date = Date()
         let name = Self.newBackupName(at: date)
         let url = directoryURL.appendingPathComponent(name)
-        let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize.map(Int64.init)
+        // A URL can cache resource values across writes to the same path on Apple platforms.
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        guard let fileSize = attributes[.size] as? NSNumber else { throw WebDAVSyncError.unexpectedResponse }
+        let size = fileSize.int64Value
+        // Discover missing collections before streaming what can be several gigabytes.
+        let (_, directory) = try await send(directoryQuery(depth: 0))
+        switch directory.statusCode {
+        case 404, 409: try await createCollection(directoryURL)
+        // A write-only DAV account may prohibit PROPFIND but still allow the conditional PUT.
+        case 207, 403, 405, 501: break
+        default: throw Self.error(directory)
+        }
         var put = request(method: "PUT", url: url)
         put.setValue("application/zip", forHTTPHeaderField: "Content-Type")
         put.setValue("*", forHTTPHeaderField: "If-None-Match")
@@ -238,8 +256,8 @@ public final class WebDAVSync: Sendable {
             throw WebDAVSyncError.unexpectedResponse
         }
         if let expected = backup.size {
-            let size = try download.resourceValues(forKeys: [.fileSizeKey]).fileSize
-            guard size.map(Int64.init) == expected else { throw WebDAVSyncError.remoteChanged }
+            let received = try handle.seekToEnd()
+            guard received == expected else { throw WebDAVSyncError.incompleteBackup(expected: expected, received: received) }
         }
         try FileManager.default.moveItem(at: download, to: file)
     }
@@ -335,6 +353,17 @@ public final class WebDAVSync: Sendable {
             // instead of delivering the server's 401 as an HTTP response.
             throw WebDAVSyncError.unauthorized
         }
+    }
+
+    // Some DAV implementations expose the opaque tag without HTTP's surrounding quotes in XML.
+    // Use it only for a conditional read. Mutable JSON writes still require a strong HTTP ETag.
+    private static func listedETag(_ tag: String) -> String? {
+        if isStrongETag(tag) { return tag }
+        let quoted = "\"" + tag + "\""
+        guard !tag.isEmpty, tag != "*", !tag.hasPrefix("W/"), !tag.contains(","), isStrongETag(quoted) else {
+            return nil
+        }
+        return quoted
     }
 
     private static func isStrongETag(_ tag: String) -> Bool {

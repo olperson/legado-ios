@@ -92,7 +92,7 @@ private final class BackupDAVProtocol: URLProtocol, @unchecked Sendable {
             reply(Self.folders.create(url))
         case "PROPFIND":
             guard Self.folders.has(url) else { reply(404); return }
-            guard request.value(forHTTPHeaderField: "Depth") == "1" else { reply(400); return }
+            guard ["0", "1"].contains(request.value(forHTTPHeaderField: "Depth") ?? "") else { reply(400); return }
             let xml = Self.listing(host: url.host!)
             reply(207, body: Data(xml.utf8), type: "application/xml")
         case "PUT":

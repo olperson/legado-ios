@@ -30,6 +30,7 @@ final class WebDAVBackupService: ObservableObject {
     static let shared = WebDAVBackupService()
     @Published private(set) var isRestoring = false
     var canRestore: () -> Bool = { true }
+    var stableFileRevision: () -> Int? = { 0 }
     var didRestore: () async -> Void = {}
     private var busy = false
 
@@ -69,12 +70,16 @@ final class WebDAVBackupService: ObservableObject {
     }
 
     private func snapshot(_ database: LegadoDatabase) async throws -> Snapshot {
+        guard let revision = stableFileRevision() else { throw LibraryRestoreError.busy }
         try await finishPendingSession(database)
         let file = Self.temporaryZIP()
         do {
             try await ChapterContentCache.live().prepareForBackup()
             let sessions = try await BackupSessionState.capture()
             let fingerprint = try await database.createFullBackup(at: file, connection: sessions)
+            // A file rename/removal and its shelf update span two stores. An automatic
+            // backup racing that operation must retry with the matching book identifiers.
+            guard stableFileRevision() == revision else { throw LibraryRestoreError.busy }
             return Snapshot(url: file, fingerprint: fingerprint)
         } catch {
             try? FileManager.default.removeItem(at: file)

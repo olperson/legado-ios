@@ -20,13 +20,12 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: backup-tests-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   test:
     name: ${{ matrix.suite }}
+    concurrency:
+      group: backup-tests-${{ github.ref }}-${{ matrix.suite }}
+      cancel-in-progress: true
     strategy:
       fail-fast: false
       matrix:
@@ -77,7 +76,7 @@ jobs:
           summary=$(grep -E 'Test run with [1-9][0-9]* tests? .*passed' "$RUNNER_TEMP/backup.log" | tail -1)
           echo "::notice::$summary"
 
-      - name: Exercise the app backup service on an iPhone
+      - name: Boot the iPhone simulator
         if: matrix.suite == 'iPhone'
         shell: bash
         run: |
@@ -90,18 +89,30 @@ jobs:
              .value[] | select(.isAvailable and (.name | startswith("iPhone"))) |
              {runtime: $runtime, name, udid}] | max_by(.runtime, .name).udid')
           xcrun simctl bootstatus "$device" -b
+          echo "BACKUP_TEST_DEVICE=$device" >> "$GITHUB_ENV"
+
+      - name: Test ZIP backup and restore on the iPhone
+        if: matrix.suite == 'iPhone'
+        shell: bash
+        run: |
+          set -euo pipefail
+          device=$BACKUP_TEST_DEVICE
           run_tests() {
             local scheme=$1 result="$RUNNER_TEMP/$1.xcresult" summary suite
             shift
             local selectors=()
             for suite in "$@"; do selectors+=("-only-testing:$scheme/$suite"); done
+            local status=0
             xcodebuild -project Legado.xcodeproj -scheme "$scheme" -configuration Debug \
               -destination "platform=iOS Simulator,id=$device" -derivedDataPath "$RUNNER_TEMP/DerivedData" \
               -onlyUsePackageVersionsFromResolvedFile -parallel-testing-enabled NO \
+              -test-timeouts-enabled YES -default-test-execution-time-allowance 240 -maximum-test-execution-time-allowance 300 \
               "${selectors[@]}" -resultBundlePath "$result" CODE_SIGN_IDENTITY=- test \
-              2>&1 | tee -a "$RUNNER_TEMP/backup.log"
+              2>&1 | tee -a "$RUNNER_TEMP/backup.log" || status=$?
             summary=$(xcrun xcresulttool get test-results summary --path "$result")
             jq -r --arg scheme "$scheme" '"::notice::\($scheme) — \(.passedTests) passed, \(.failedTests) failed, \(.skippedTests) skipped"' <<< "$summary"
+            jq -r '.testFailures[]? | "::error::" + .testName + " — " + .failureText' <<< "$summary"
+            [[ $status == 0 ]]
             jq -e '.passedTests > 0 and .failedTests == 0 and .skippedTests == 0' <<< "$summary" >/dev/null
           }
           run_tests LegadoReaderTests WebDAVBackupIntegrationTests BackupSessionStateTests
@@ -114,6 +125,11 @@ jobs:
         run: |
           if [[ -f "$RUNNER_TEMP/backup.log" ]]; then
             awk '(/error:|failed|recorded an issue|[Ee]xpectation failed/) && !seen[$0]++ && ++n <= 24 { gsub(/%/, "%25"); print "::error::" $0 }' "$RUNNER_TEMP/backup.log"
+          fi
+          if [[ -f "$RUNNER_TEMP/dav-server.log" ]]; then
+            tail -n 20 "$RUNNER_TEMP/dav-server.log" | while IFS= read -r line; do
+              echo "::notice::DAV ${line//%/%25}"
+            done
           fi
       - name: Stop the WebDAV test server
         if: always()
@@ -128,6 +144,7 @@ jobs:
           name: backup-${{ matrix.suite }}-diagnostics
           path: |
             ${{ runner.temp }}/backup.log
+            ${{ runner.temp }}/dav-server.log
             ${{ runner.temp }}/LegadoReader*.xcresult
           if-no-files-found: ignore
           retention-days: 3

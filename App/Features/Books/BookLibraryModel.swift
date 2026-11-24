@@ -99,8 +99,17 @@ final class BookLibraryModel: ObservableObject {
     private var sourceSwitchSaveTask: Task<Bool, Never>?
     private var loadGeneration = 0
     private var snapshotRestoreTask: Task<Void, Error>?
+    private var fileOperations = 0
+    private var fileRevision = 0
+    var stableFileRevision: Int? { fileOperations == 0 ? fileRevision : nil }
+
+    private func beginFileOperation() {
+        fileOperations += 1
+        fileRevision &+= 1
+    }
+
     var canRestoreSnapshot: Bool {
-        snapshotRestoreTask == nil && !isCheckingUpdates && bookSaveTask == nil &&
+        fileOperations == 0 && snapshotRestoreTask == nil && !isCheckingUpdates && bookSaveTask == nil &&
             groupSaveTask == nil && sourceSwitchSaveTask == nil && deletingGroupIDs.isEmpty
     }
 
@@ -688,6 +697,8 @@ final class BookLibraryModel: ObservableObject {
     }
 
     func importPickedLocalFiles(_ files: [LocalBookImportFile]) async {
+        beginFileOperation()
+        defer { fileOperations -= 1 }
         // Keep the picker grants alive through the review and asynchronous copy.
         defer { withExtendedLifetime(files) {} }
         var failures: [String] = []
@@ -785,6 +796,8 @@ final class BookLibraryModel: ObservableObject {
     }
 
     func renameLocalFile(at url: URL, to name: String) async throws {
+        beginFileOperation()
+        defer { fileOperations -= 1 }
         await waitForSourceSwitch()
         let target = try await localFiles.rename(url, to: name)
         guard target != url else { return }
@@ -806,6 +819,8 @@ final class BookLibraryModel: ObservableObject {
     }
 
     func deleteLocalFile(at url: URL) async throws {
+        beginFileOperation()
+        defer { fileOperations -= 1 }
         await waitForSourceSwitch()
         let staged: StagedLocalFile?
         if url.isFileURL,

@@ -21,6 +21,7 @@ struct LegadoApp: App {
         let library = ApplicationLibrary(demo: demo, database: database)
         _library = StateObject(wrappedValue: library)
         WebDAVBackupService.shared.canRestore = { [weak library] in library?.models.canRestore == true }
+        WebDAVBackupService.shared.stableFileRevision = { [weak library] in library?.models.bookLibrary.stableFileRevision }
         WebDAVBackupService.shared.didRestore = { [weak library] in
             await library?.reloadAfterRestore()
         }
