@@ -23,55 +23,91 @@ final class ReaderScrollGestureTests: XCTestCase {
             XCTAssertTrue(app.navigationBars["备份与恢复"].waitForExistence(timeout: 10))
             XCTAssertFalse(app.buttons["立即同步"].isEnabled)
         }
-        func openFixtureFolder() {
-            let browse = app.tabBars.buttons.matching(NSPredicate(format: "label IN %@", ["Browse", "浏览"])).firstMatch
-            if browse.exists && !browse.isSelected { browse.tap() }
-            openImportFixtureFolder(in: app)
+        func setSwitch(_ toggle: XCUIElement, to value: String, towardBottom: Bool = true) {
+            reveal(toggle, towardBottom: towardBottom)
+            if toggle.value as? String != value {
+                toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
+            }
+            XCTAssertEqual(toggle.value as? String, value, toggle.label)
+        }
+        func filesState() -> String {
+            let locations = app.navigationBars.allElementsBoundByIndex.map(\.identifier)
+            let files = app.cells.allElementsBoundByIndex.prefix(8).map(\.label)
+            return "Files locations \(locations), items \(files)"
+        }
+        func browseLocalFiles() {
+            let browseTitles = ["Browse", "浏览", "Locations", "位置"]
+            let localTitles = ["On My iPhone", "我的 iPhone", "我的iPhone"]
+            let browseTab = app.tabBars.buttons.matching(NSPredicate(format: "label IN %@", browseTitles)).firstMatch
+            if browseTab.isHittable && !browseTab.isSelected { browseTab.tap() }
+            if app.navigationBars.matching(NSPredicate(format: "identifier IN %@", localTitles)).firstMatch.exists { return }
+            let browse = app.navigationBars.buttons.matching(NSPredicate(format: "label IN %@", browseTitles)).firstMatch
+            if browse.isHittable { browse.tap() }
+            let local = app.descendants(matching: .any).matching(NSPredicate(format: "label IN %@", localTitles)).firstMatch
+            if local.waitForExistence(timeout: 3), local.isHittable { local.tap() }
         }
 
         openSettings()
         let open = app.switches["打开应用时备份"]
         let interval = app.switches["按间隔备份"]
         let daily = app.switches["每日定时备份"]
-        for toggle in [open, interval, daily] {
-            reveal(toggle)
-            if toggle.value as? String == "1" { toggle.tap() }
-        }
+        for toggle in [open, interval, daily] { setSwitch(toggle, to: "0") }
 
         let export = app.buttons["导出 ZIP 备份到文件"]
         reveal(export, towardBottom: false)
+        let stamp = DateFormatter()
+        stamp.locale = Locale(identifier: "en_US_POSIX")
+        stamp.timeZone = TimeZone(secondsFromGMT: 0)
+        stamp.dateFormat = "yyyyMMdd'T'HHmmssSSS'Z'"
+        let earliestName = "legado-ios-" + stamp.string(from: Date())
         export.tap()
         let save = app.buttons.matching(NSPredicate(format: "label IN %@", ["Save", "存储", "储存", "保存"])).firstMatch
-        XCTAssertTrue(save.waitForExistence(timeout: 30), app.debugDescription)
-        openFixtureFolder()
+        XCTAssertTrue(save.waitForExistence(timeout: 30), "ZIP export did not open Files. \(filesState())")
+        let latestName = "legado-ios-" + stamp.string(from: Date()) + "~"
+        if !save.isEnabled { browseLocalFiles() }
+        XCTAssertTrue(save.isEnabled, "No writable export destination. \(filesState())")
+        let exportFolders = app.navigationBars.allElementsBoundByIndex.map(\.identifier).filter { !$0.isEmpty && $0 != "备份与恢复" }
         save.tap()
         expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: save)
         waitForExpectations(timeout: 15)
 
         // A restored real preference distinguishes importing the selected ZIP from just dismissing Files.
-        for toggle in [open, interval, daily] {
-            reveal(toggle)
-            toggle.tap()
-            XCTAssertEqual(toggle.value as? String, "1")
-        }
+        for toggle in [open, interval, daily] { setSwitch(toggle, to: "1") }
         XCTAssertEqual(interval.value as? String, "1")
-        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "本地时间")).firstMatch.exists)
+        let localTime = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", "本地时间")).firstMatch
+        reveal(localTime)
         // Avoid an app-opening backup while moving through Apple's file provider.
-        reveal(open, towardBottom: false)
-        open.tap()
+        setSwitch(open, to: "0", towardBottom: false)
 
         let pick = app.buttons["选择 ZIP 文件恢复"]
         reveal(pick, towardBottom: false)
         pick.tap()
-        let files = app.collectionViews["File View"].cells
-        let archive = files.matching(NSPredicate(format: "label BEGINSWITH %@", "legado-")).firstMatch
-        if !archive.waitForExistence(timeout: 3) { openFixtureFolder() }
-        XCTAssertTrue(archive.waitForExistence(timeout: 10), app.debugDescription)
+        // Files can reopen at the last folder or Recents. Restrict selection to
+        // the export's UTC timestamp so an older backup cannot satisfy the test.
+        let files = app.descendants(matching: .any)
+        let archive = files.matching(NSPredicate(format: "label BEGINSWITH %@ AND label >= %@ AND label <= %@",
+                                                 "legado-ios-", earliestName, latestName)).firstMatch
+        if !archive.waitForExistence(timeout: 3) {
+            let recent = app.buttons.matching(NSPredicate(format: "label IN %@",
+                                                          ["Recents", "最近使用", "最近项目"])).firstMatch
+            if recent.isHittable { recent.tap() }
+        }
+        if !archive.waitForExistence(timeout: 5) {
+            browseLocalFiles()
+            if !archive.waitForExistence(timeout: 2), !exportFolders.isEmpty {
+                let names = exportFolders.map { NSPredicate(format: "label BEGINSWITH %@", $0) }
+                let destination = app.cells.matching(NSCompoundPredicate(orPredicateWithSubpredicates: names)).firstMatch
+                if destination.isHittable { destination.tap() }
+            }
+        }
+        XCTAssertTrue(archive.waitForExistence(timeout: 10), "Could not find exported ZIP from \(exportFolders). \(filesState())")
         archive.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
         let choose = app.buttons.matching(NSPredicate(format: "label IN %@", ["Open", "打开", "Import", "导入"])).firstMatch
-        if choose.exists { choose.tap() }
         let confirm = app.alerts["恢复所选备份？"]
-        XCTAssertTrue(confirm.waitForExistence(timeout: 20), app.debugDescription)
+        if !confirm.waitForExistence(timeout: 2), choose.isHittable && choose.isEnabled { choose.tap() }
+        XCTAssertTrue(confirm.waitForExistence(timeout: 20), "Selected ZIP did not reach restore confirmation. \(filesState())")
+        XCTAssertTrue(confirm.staticTexts.matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@",
+                                                               "legado-ios-", ".zip")).firstMatch.exists)
         confirm.buttons["恢复备份"].tap()
         let restored = app.alerts["备份已恢复"]
         XCTAssertTrue(restored.waitForExistence(timeout: 35), app.debugDescription)

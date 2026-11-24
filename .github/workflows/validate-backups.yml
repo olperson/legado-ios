@@ -77,6 +77,7 @@ jobs:
           echo "::notice::$summary"
 
       - name: Boot the iPhone simulator
+        id: simulator
         if: matrix.suite == 'iPhone'
         shell: bash
         run: |
@@ -94,35 +95,38 @@ jobs:
           fi
           echo "BACKUP_TEST_DEVICE=$device" >> "$GITHUB_ENV"
 
-      - name: Test ZIP backup and restore on the iPhone
+      - name: Export and restore a ZIP through Files on the iPhone
         if: matrix.suite == 'iPhone'
         shell: bash
-        run: |
+        env:
+          SCHEME: LegadoReaderUITests
+          TEST_CASES: ReaderScrollGestureTests/testLocalZIPBackupAndRestoreWithoutWebDAV
+        run: &run_iphone_tests |
           set -euo pipefail
-          device=$BACKUP_TEST_DEVICE
-          run_tests() {
-            local scheme=$1 result="$RUNNER_TEMP/$1.xcresult" summary suite
-            shift
-            local selectors=()
-            for suite in "$@"; do selectors+=("-only-testing:$scheme/$suite"); done
-            local status=0
-            xcodebuild -project Legado.xcodeproj -scheme "$scheme" -configuration Debug \
-              -destination "platform=iOS Simulator,id=$device" -derivedDataPath "$RUNNER_TEMP/DerivedData" \
-              -onlyUsePackageVersionsFromResolvedFile -parallel-testing-enabled NO \
-              -test-timeouts-enabled YES -default-test-execution-time-allowance 240 -maximum-test-execution-time-allowance 300 \
-              "${selectors[@]}" -resultBundlePath "$result" CODE_SIGN_IDENTITY=- test \
-              2>&1 | tee -a "$RUNNER_TEMP/backup.log" || status=$?
-            summary=$(xcrun xcresulttool get test-results summary --path "$result") || return 1
-            jq -r --arg scheme "$scheme" '"::notice::\($scheme) — \(.passedTests) passed, \(.failedTests) failed, \(.skippedTests) skipped"' <<< "$summary"
-            jq -r '.testFailures[]? | "::error::" + .testName + " — " + .failureText' <<< "$summary"
-            if [[ $status != 0 ]]; then return "$status"; fi
-            jq -e '.passedTests > 0 and .failedTests == 0 and .skippedTests == 0' <<< "$summary" >/dev/null
-          }
-          failed=0
-          run_tests LegadoReaderTests WebDAVBackupIntegrationTests BackupSessionStateTests || failed=1
-          sh scripts/prepare-source-import-fixture.sh "$device"
-          run_tests LegadoReaderUITests ReaderScrollGestureTests/testLocalZIPBackupAndRestoreWithoutWebDAV || failed=1
-          exit "$failed"
+          result="$RUNNER_TEMP/$SCHEME.xcresult"
+          read -r -a cases <<< "$TEST_CASES"
+          selectors=()
+          for test_case in "${cases[@]}"; do selectors+=("-only-testing:$SCHEME/$test_case"); done
+          status=0
+          xcodebuild -project Legado.xcodeproj -scheme "$SCHEME" -configuration Debug \
+            -destination "platform=iOS Simulator,id=$BACKUP_TEST_DEVICE" -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -onlyUsePackageVersionsFromResolvedFile -parallel-testing-enabled NO \
+            -test-timeouts-enabled YES -default-test-execution-time-allowance 240 -maximum-test-execution-time-allowance 300 \
+            "${selectors[@]}" -resultBundlePath "$result" CODE_SIGN_IDENTITY=- test \
+            2>&1 | tee -a "$RUNNER_TEMP/backup.log" || status=$?
+          summary=$(xcrun xcresulttool get test-results summary --path "$result")
+          jq -r --arg scheme "$SCHEME" '"::notice::\($scheme) — \(.passedTests) passed, \(.failedTests) failed, \(.skippedTests) skipped"' <<< "$summary"
+          jq -r '.testFailures[]? | "::error::" + .testName + " — " + .failureText' <<< "$summary"
+          if [[ $status != 0 ]]; then exit "$status"; fi
+          jq -e '.passedTests > 0 and .failedTests == 0 and .skippedTests == 0' <<< "$summary" >/dev/null
+
+      - name: Test clean-install restore, WebDAV and sessions on the iPhone
+        if: ${{ !cancelled() && matrix.suite == 'iPhone' && steps.simulator.outcome == 'success' }}
+        shell: bash
+        env:
+          SCHEME: LegadoReaderTests
+          TEST_CASES: WebDAVBackupIntegrationTests BackupSessionStateTests
+        run: *run_iphone_tests
 
       - name: Report diagnostics
         if: failure()
