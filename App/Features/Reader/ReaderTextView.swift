@@ -375,6 +375,7 @@ struct ReaderTextView: UIViewRepresentable {
         private var pageRangeRetryCount = 0
         private weak var coverPan: UIPanGestureRecognizer?
         private var coverView: ReaderCoverView?
+        private var awaitingCoverChapter = false
         private weak var nextSwipe: UISwipeGestureRecognizer?
         private weak var previousSwipe: UISwipeGestureRecognizer?
         private weak var readerTap: UITapGestureRecognizer?
@@ -497,7 +498,7 @@ struct ReaderTextView: UIViewRepresentable {
         }
 
         func holdDisplayedPage() {
-            cancelCover()
+            if !awaitingCoverChapter { cancelCover() }
             layoutGeneration &+= 1
             isAutoReadPaused = true
         }
@@ -1019,6 +1020,7 @@ struct ReaderTextView: UIViewRepresentable {
         func cancelCover() {
             guard let overlay = coverView else { return }
             coverView = nil
+            awaitingCoverChapter = false
             overlay.removeFromSuperview()
             isTurningPage = false
             if let view = textView { updatePageMask(in: view) }
@@ -1032,12 +1034,16 @@ struct ReaderTextView: UIViewRepresentable {
                 overlay.setProgress(commit ? 1 : 0)
             } completion: { [weak self] _ in
                 guard let self, self.coverView === overlay, let view = self.textView else { return }
-                self.cancelCover()
-                guard commit else { return }
-                if let target = overlay.targetOffset {
-                    view.setContentOffset(CGPoint(x: 0, y: target), animated: false)
-                } else {
+                if commit, overlay.targetOffset == nil {
+                    // Keep the destination visible while an uncached chapter is loading.
+                    // The chapter change or dismantle will retire this overlay.
+                    self.awaitingCoverChapter = true
                     self.crossChapterBoundary(overlay.direction, in: view)
+                } else {
+                    self.cancelCover()
+                    if commit, let target = overlay.targetOffset {
+                        view.setContentOffset(CGPoint(x: 0, y: target), animated: false)
+                    }
                 }
             }
         }
