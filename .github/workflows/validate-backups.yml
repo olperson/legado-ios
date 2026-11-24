@@ -88,7 +88,10 @@ jobs:
              select($runtime[:2] <= ($sdk | split(".") | map(tonumber) | .[:2])) |
              .value[] | select(.isAvailable and (.name | startswith("iPhone"))) |
              {runtime: $runtime, name, udid}] | max_by(.runtime, .name).udid')
-          xcrun simctl bootstatus "$device" -b
+          if ! xcrun simctl boot "$device"; then
+            xcrun simctl list devices -j | jq -e --arg id "$device" \
+              'any(.devices[][]; .udid == $id and (.state == "Booted" or .state == "Booting"))' >/dev/null
+          fi
           echo "BACKUP_TEST_DEVICE=$device" >> "$GITHUB_ENV"
 
       - name: Test ZIP backup and restore on the iPhone
@@ -109,22 +112,24 @@ jobs:
               -test-timeouts-enabled YES -default-test-execution-time-allowance 240 -maximum-test-execution-time-allowance 300 \
               "${selectors[@]}" -resultBundlePath "$result" CODE_SIGN_IDENTITY=- test \
               2>&1 | tee -a "$RUNNER_TEMP/backup.log" || status=$?
-            summary=$(xcrun xcresulttool get test-results summary --path "$result")
+            summary=$(xcrun xcresulttool get test-results summary --path "$result") || return 1
             jq -r --arg scheme "$scheme" '"::notice::\($scheme) — \(.passedTests) passed, \(.failedTests) failed, \(.skippedTests) skipped"' <<< "$summary"
             jq -r '.testFailures[]? | "::error::" + .testName + " — " + .failureText' <<< "$summary"
-            [[ $status == 0 ]]
+            if [[ $status != 0 ]]; then return "$status"; fi
             jq -e '.passedTests > 0 and .failedTests == 0 and .skippedTests == 0' <<< "$summary" >/dev/null
           }
-          run_tests LegadoReaderTests WebDAVBackupIntegrationTests BackupSessionStateTests
+          failed=0
+          run_tests LegadoReaderTests WebDAVBackupIntegrationTests BackupSessionStateTests || failed=1
           sh scripts/prepare-source-import-fixture.sh "$device"
-          run_tests LegadoReaderUITests ReaderScrollGestureTests/testLocalZIPBackupAndRestoreWithoutWebDAV
+          run_tests LegadoReaderUITests ReaderScrollGestureTests/testLocalZIPBackupAndRestoreWithoutWebDAV || failed=1
+          exit "$failed"
 
       - name: Report diagnostics
         if: failure()
         shell: bash
         run: |
           if [[ -f "$RUNNER_TEMP/backup.log" ]]; then
-            awk '(/error:|failed|recorded an issue|[Ee]xpectation failed/) && !seen[$0]++ && ++n <= 24 { gsub(/%/, "%25"); print "::error::" $0 }' "$RUNNER_TEMP/backup.log"
+            awk '(/: error:|Test Case .* failed|recorded an issue|Expectation failed|Executed .* with [1-9][0-9]* failures|Test run with .* failed/) && !seen[$0]++ && ++n <= 24 { gsub(/%/, "%25"); print "::error::" $0 }' "$RUNNER_TEMP/backup.log"
           fi
           if [[ -f "$RUNNER_TEMP/dav-server.log" ]]; then
             tail -n 20 "$RUNNER_TEMP/dav-server.log" | while IFS= read -r line; do
