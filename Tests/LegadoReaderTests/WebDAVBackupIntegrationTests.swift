@@ -46,6 +46,53 @@ final class WebDAVBackupIntegrationTests: XCTestCase {
         XCTAssertEqual(refreshes, 1)
     }
 
+    func testNewWebDAVDirectoryAndRestoringASelectedVersion() async throws {
+        let port = try XCTUnwrap(ProcessInfo.processInfo.environment["LEGADO_TEST_DAV_PORT"],
+                                 "The test requires the loopback DAV fixture")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try LegadoDatabase(url: root.appendingPathComponent("a/legado.sqlite3"))
+        let other = try LegadoDatabase(url: root.appendingPathComponent("b/legado.sqlite3"))
+        let account = WebDAVAccount(directory: "http://127.0.0.1:\(port)/dav/新目录/\(UUID())/备份")
+        let client = try account.makeClient()
+        let service = WebDAVBackupService()
+        let firstBook = Book(bookUrl: "https://example.org/a", name: "原来的书架", author: "")
+        let otherBook = Book(bookUrl: "https://example.org/b", name: "另一台设备", author: "")
+
+        try await database.replaceBooks([firstBook])
+        guard case .uploaded = try await service.sync(database: database, account: account) else {
+            return XCTFail("立即同步应创建目录并上传首份完整 ZIP")
+        }
+        guard case .unchanged = try await service.sync(database: database, account: account) else {
+            return XCTFail("数据未变化时不应新建备份")
+        }
+        let firstList = try await client.listBackups()
+        let first = try XCTUnwrap(firstList.first)
+
+        try await other.replaceBooks([otherBook])
+        let upload = try await service.createArchive(database: other)
+        defer { try? FileManager.default.removeItem(at: upload) }
+        let second = try await client.uploadBackup(from: upload)
+        try await database.replaceBooks([])
+        guard case .conflict(let conflict) = try await service.sync(database: database, account: account) else {
+            return XCTFail("两端都改动时应让用户选择")
+        }
+        XCTAssertEqual(conflict.remoteName, second.name)
+        guard case .restored = try await service.resolve(conflict, preferLocal: false, database: database, account: account) else {
+            return XCTFail("选择云端应恢复最新书架")
+        }
+        let synced = try await database.loadBooks()
+        XCTAssertEqual(synced.map(\.name), [otherBook.name])
+        try await service.restoreRemote(first, database: database, account: account)
+        let historical = try await database.loadBooks()
+        XCTAssertEqual(historical.map(\.name), [firstBook.name])
+        guard case .conflict = try await service.sync(database: database, account: account) else {
+            return XCTFail("手动恢复历史版本后应保留选择权")
+        }
+        let history = try await client.listBackups()
+        XCTAssertEqual(history.map(\.name), [second.name, first.name])
+    }
+
     func testRejectsNonBackupZIPWithoutReplacingTheShelf() async throws {
         let work = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: work) }

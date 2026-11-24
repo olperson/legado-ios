@@ -32,7 +32,7 @@ struct FullBackupStorage: @unchecked Sendable {
 }
 
 enum FullBackupArchive {
-    private static let fm = FileManager.default
+    private static var fm: FileManager { .default }
     private static let installLock = NSRecursiveLock()
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     private static let marker = "legado.fullRestore."
@@ -122,6 +122,10 @@ enum FullBackupArchive {
     }
 
     static func create(database: OpaquePointer, storage: FullBackupStorage, at url: URL, connection: Data?) throws -> String {
+        try installLock.withLock { try createLocked(database: database, storage: storage, at: url, connection: connection) }
+    }
+
+    private static func createLocked(database: OpaquePointer, storage: FullBackupStorage, at url: URL, connection: Data?) throws -> String {
         let stage = try temporaryDirectory()
         defer { try? fm.removeItem(at: stage) }
         let dbCopy = stage.appendingPathComponent(dbFile)
@@ -136,6 +140,7 @@ enum FullBackupArchive {
         let archive = try Archive(url: result, accessMode: .create)
         var files = [String: String]()
         func add(_ name: String, data: Data) throws {
+            guard data.count <= 32 << 20 else { throw invalid("配置或备份清单过大。") }
             try archive.addEntry(with: name, type: .file, uncompressedSize: Int64(data.count), compressionMethod: .deflate) { offset, size in
                 data.subdata(in: Int(offset)..<(Int(offset) + size))
             }
@@ -422,6 +427,7 @@ enum FullBackupArchive {
     }
 
     static func recover(database: OpaquePointer, storage: FullBackupStorage) throws {
+        guard fm.fileExists(atPath: storage.journal.path) else { return }
         try installLock.withLock { try recoverLocked(database: database, storage: storage) }
     }
 
@@ -442,10 +448,15 @@ enum FullBackupArchive {
                     }
                     let backup = journal.appendingPathComponent(root.name).appendingPathComponent(item.name)
                     let target = root.url.appendingPathComponent(item.name)
-                    let saved = fm.fileExists(atPath: backup.path)
-                    guard !item.hadOriginal || saved else { continue }
-                    if fm.fileExists(atPath: target.path) { try fm.removeItem(at: target) }
-                    if saved { try fm.moveItem(at: backup, to: target) }
+                    if item.hadOriginal {
+                        guard itemExists(backup) else { continue }
+                        if itemExists(target) { try fm.removeItem(at: target) }
+                        try fm.moveItem(at: backup, to: target)
+                    } else if itemExists(target), try names(in: root.url).contains(item.name) {
+                        // A case-insensitive volume may already have rolled an item back to
+                        // its original spelling. Only discard the incoming spelling here.
+                        try fm.removeItem(at: target)
+                    }
                 }
                 storage.defaults.setPersistentDomain(originalPreferences, forName: storage.domain)
                 guard storage.defaults.synchronize() else { throw invalid("无法还原本机偏好设置。") }
@@ -460,6 +471,11 @@ enum FullBackupArchive {
             // No live data is touched until install.json is durably written.
             try fm.removeItem(at: journal)
         }
+    }
+
+    private static func itemExists(_ url: URL) -> Bool {
+        // fileExists follows links and returns false for a dangling link.
+        fm.fileExists(atPath: url.path) || (try? fm.destinationOfSymbolicLink(atPath: url.path)) != nil
     }
 
     private static func liveFilename(_ db: OpaquePointer) -> String {

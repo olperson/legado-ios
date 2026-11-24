@@ -4,7 +4,7 @@ import ZIPFoundation
 @testable import LegadoCore
 
 struct FullBackupArchiveTests {
-    private let fm = FileManager.default
+    private var fm: FileManager { .default }
 
     private func storage(in root: URL, name: String) -> FullBackupStorage {
         let container = root.appendingPathComponent(name)
@@ -58,6 +58,13 @@ struct FullBackupArchiveTests {
         try fm.copyItem(at: first, to: localBackup)
         new.defaults.setPersistentDomain(["webdav.schedule.runtime": 7], forName: new.domain)
         #expect(try await fresh.restoreFullBackup(from: first, storage: new) == account)
+        #expect(try await reader.pendingBackupSession() == account)
+        let baseline = try await fresh.createFullBackup(at: temp.appendingPathComponent("pending.zip"), connection: nil, storage: new)
+        try await reader.acknowledgeBackupSession(Data("unrelated".utf8))
+        #expect(try await reader.pendingBackupSession() == account)
+        try await reader.acknowledgeBackupSession(account)
+        #expect(try await reader.pendingBackupSession() == nil)
+        #expect(try await fresh.createFullBackup(at: temp.appendingPathComponent("settled.zip"), connection: nil, storage: new) == baseline)
         #expect(try await reader.cacheValue(for: "rule.variable", now: 0) == "token")
         #expect(try await reader.cookie(for: "https://example.test")?.cookie == "reader=1")
         #expect(try await reader.loadSearchKeywords(order: .usage).map(\.word) == ["灯塔"])

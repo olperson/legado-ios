@@ -200,6 +200,9 @@ final class WebDAVBackupService: ObservableObject {
         // A completed restore must remain a success even if disk space no longer
         // permits an additional temporary archive for the synchronization baseline.
         UserDefaults.standard.removeObject(forKey: key)
+        // A historical restore is an explicit local choice. Ask before the next
+        // sync would replace it with a newer version from the same directory.
+        if expected == nil, (try? await latest(client))?.name != remote.name { return .restored }
         if let restored = try? await snapshot(database) {
             defer { try? FileManager.default.removeItem(at: restored.url) }
             try record(restored.fingerprint, remote, key: key)

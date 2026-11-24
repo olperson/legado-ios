@@ -61,9 +61,7 @@ public final class WebDAVSync: Sendable {
 
     init(directoryURL: String, username: String, password: String, configuration: URLSessionConfiguration) throws {
         let input = directoryURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Preserve existing percent escapes even when the user also typed unescaped Unicode or spaces.
-        let allowed = CharacterSet.urlFragmentAllowed.union(CharacterSet(charactersIn: "%#[]"))
-        guard let address = input.addingPercentEncoding(withAllowedCharacters: allowed),
+        guard let address = Self.encodedAddress(input),
               var parts = URLComponents(string: address),
               let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme),
               let host = parts.host, !host.isEmpty, parts.user == nil, parts.password == nil,
@@ -168,6 +166,8 @@ public final class WebDAVSync: Sendable {
         let httpDate = Self.dateFormatter("EEE, dd MMM yyyy HH:mm:ss zzz")
         let timestamp = Self.dateFormatter(Self.timestampFormat)
         let isoDate = ISO8601DateFormatter()
+        let fractionalDate = ISO8601DateFormatter()
+        fractionalDate.formatOptions.insert(.withFractionalSeconds)
         for entry in entries {
             guard entry.properties["collection"] == nil,
                   let name = backupName(href: entry.href),
@@ -175,8 +175,8 @@ public final class WebDAVSync: Sendable {
             let modified = entry.properties["getlastmodified"].flatMap(httpDate.date(from:))
             let stamp = name.dropFirst(Self.backupPrefix.count).prefix(19)
             let created = name.hasPrefix(Self.backupPrefix) && stamp.count == 19 ? timestamp.date(from: String(stamp)) : nil
-            let date = created ?? modified
-                ?? entry.properties["creationdate"].flatMap(isoDate.date(from:)) ?? .distantPast
+            let creationDate = entry.properties["creationdate"].flatMap { isoDate.date(from: $0) ?? fractionalDate.date(from: $0) }
+            let date = created ?? modified ?? creationDate ?? .distantPast
             files[name] = WebDAVBackupFile(name: name, date: date,
                                            size: entry.properties["getcontentlength"].flatMap(Int64.init),
                                            etag: entry.properties["getetag"], modified: modified.map(httpDate.string(from:)))
@@ -256,6 +256,11 @@ public final class WebDAVSync: Sendable {
         return formatter
     }
 
+    // Preserve existing percent escapes when a user or server also supplies literal Unicode or spaces.
+    private static func encodedAddress(_ address: String) -> String? {
+        address.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed.union(CharacterSet(charactersIn: "%#[]")))
+    }
+
     private static func isPathComponent(_ component: String) -> Bool {
         !component.isEmpty && component != "." && component != ".." &&
             !component.contains("/") && !component.contains("\\") &&
@@ -263,7 +268,8 @@ public final class WebDAVSync: Sendable {
     }
 
     private func backupName(href: String) -> String? {
-        guard let url = URL(string: href, relativeTo: directoryURL)?.absoluteURL,
+        guard let address = Self.encodedAddress(href),
+              let url = URL(string: address, relativeTo: directoryURL)?.absoluteURL,
               let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let directory = URLComponents(url: directoryURL, resolvingAgainstBaseURL: false),
               parts.scheme?.lowercased() == directory.scheme?.lowercased(),
@@ -344,9 +350,11 @@ public final class WebDAVSync: Sendable {
 
     private static func error(_ response: HTTPURLResponse) -> WebDAVSyncError {
         switch response.statusCode {
+        case 200..<300: .unexpectedResponse
         case 300..<400: .redirected
         case 401: .unauthorized
         case 403: .forbidden
+        case 404, 409: .missingDirectory
         case 412: .remoteChanged
         default: .httpStatus(response.statusCode)
         }

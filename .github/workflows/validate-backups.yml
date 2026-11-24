@@ -12,6 +12,7 @@ on:
       - 'Tests/**/*Backup*.swift'
       - 'Tests/**/*WebDAV*.swift'
       - 'Tests/LegadoReaderUITests/ReaderScrollGestureTests.swift'
+      - 'scripts/fixtures/backup-dav-server.py'
       - 'Legado.xcodeproj/project.pbxproj'
       - '.github/workflows/validate-backups.yml'
   workflow_dispatch:
@@ -42,6 +43,30 @@ jobs:
           if [[ -d /Applications/Xcode_26.1.1.app ]]; then
             echo "DEVELOPER_DIR=/Applications/Xcode_26.1.1.app/Contents/Developer" >> "$GITHUB_ENV"
           fi
+
+      - name: Start a private WebDAV server
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/dav-env"
+          "$RUNNER_TEMP/dav-env/bin/pip" install --disable-pip-version-check WsgiDAV==4.4.1 cheroot==11.1.2
+          "$RUNNER_TEMP/dav-env/bin/python" scripts/fixtures/backup-dav-server.py "$RUNNER_TEMP/dav-root" "$RUNNER_TEMP/dav-port" > "$RUNNER_TEMP/dav-server.log" 2>&1 &
+          dav_server=$!
+          echo "$dav_server" > "$RUNNER_TEMP/dav-pid"
+          for attempt in {1..200}; do
+            if ! kill -0 "$dav_server"; then cat "$RUNNER_TEMP/dav-server.log"; exit 1; fi
+            if [[ -s "$RUNNER_TEMP/dav-port" ]]; then
+              port=$(cat "$RUNNER_TEMP/dav-port")
+              if curl -fsS --max-time 1 -X OPTIONS "http://127.0.0.1:$port/dav/" -o /dev/null; then
+                echo "LEGADO_TEST_DAV_PORT=$port" >> "$GITHUB_ENV"
+                echo "TEST_RUNNER_LEGADO_TEST_DAV_PORT=$port" >> "$GITHUB_ENV"
+                exit 0
+              fi
+            fi
+            sleep 0.1
+          done
+          echo "::error::The WebDAV test server did not become ready."
+          exit 1
 
       - name: Test backup archives, schedules and WebDAV
         if: matrix.suite == 'core'
@@ -88,7 +113,14 @@ jobs:
         shell: bash
         run: |
           if [[ -f "$RUNNER_TEMP/backup.log" ]]; then
-            awk '/error:|failed|recorded an issue|[Ee]xpectation failed/ && ++n <= 16 { gsub(/%/, "%25"); print "::error::" $0 }' "$RUNNER_TEMP/backup.log"
+            awk '(/error:|failed|recorded an issue|[Ee]xpectation failed/) && !seen[$0]++ && ++n <= 24 { gsub(/%/, "%25"); print "::error::" $0 }' "$RUNNER_TEMP/backup.log"
+          fi
+      - name: Stop the WebDAV test server
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/dav-pid" ]]; then
+            kill "$(cat "$RUNNER_TEMP/dav-pid")" 2>/dev/null || true
           fi
       - uses: actions/upload-artifact@v4
         if: failure()
