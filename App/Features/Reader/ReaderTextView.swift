@@ -37,19 +37,111 @@ struct ReaderTextPage {
     }
 }
 
-/// Only the sheet on top moves. Clip the stationary sheet to the exposed strip
-/// so transparent text pages also work over the reader's background image.
+struct ReaderCoverPage {
+    let image: UIImage
+    let title: String
+    let number: Int
+    let total: Int?
+    let chapterOffset: Int
+}
+
+@MainActor
+final class ReaderCoverSurface {
+    weak var canvas: ReaderCoverCanvas.Controller?
+    weak var reader: ReaderTextView.Coordinator?
+}
+
+/// A canvas for the whole sheet, including paper outside the typeset column.
+/// SwiftUI keeps the reader menu and loading indicators above this canvas.
+struct ReaderCoverCanvas: UIViewControllerRepresentable {
+    let surface: ReaderCoverSurface
+    let sheet: (ReaderCoverPage, CGRect) -> AnyView
+
+    final class Controller: UIViewController {
+        weak var surface: ReaderCoverSurface?
+        var sheet: ((ReaderCoverPage, CGRect) -> AnyView)?
+        private var lastSize = CGSize.zero
+
+        override func loadView() {
+            view = UIView()
+            view.backgroundColor = .clear
+            view.isUserInteractionEnabled = false
+            view.accessibilityElementsHidden = true
+        }
+
+        override func viewDidLayoutSubviews() {
+            super.viewDidLayoutSubviews()
+            if lastSize != view.bounds.size {
+                surface?.reader?.cancelCover()
+                lastSize = view.bounds.size
+            }
+            surface?.reader?.updateCoverPanHost()
+        }
+
+        func install(current: ReaderCoverPage, adjacent: ReaderCoverPage, textView: UITextView,
+                     direction: Int, targetOffset: CGFloat?) -> ReaderCoverView? {
+            guard let sheet, let window = view.window, window === textView.window,
+                  !view.bounds.isEmpty else { return nil }
+            let textFrame = textView.convert(textView.bounds, to: view)
+            let hosts = [current, adjacent].map { page in
+                UIHostingController(rootView: sheet(page, textFrame).ignoresSafeArea())
+            }
+            for host in hosts {
+                addChild(host)
+                host.view.backgroundColor = .clear
+            }
+            let overlay = ReaderCoverView(frame: view.bounds, current: hosts[0].view, adjacent: hosts[1].view,
+                                          direction: direction, targetOffset: targetOffset)
+            view.addSubview(overlay)
+            for host in hosts {
+                host.didMove(toParent: self)
+                host.view.setNeedsLayout()
+                host.view.layoutIfNeeded()
+            }
+            return overlay
+        }
+
+        func removeSheets() {
+            for child in children {
+                child.willMove(toParent: nil)
+                child.view.removeFromSuperview()
+                child.removeFromParent()
+            }
+        }
+    }
+
+    func makeUIViewController(context: Context) -> Controller {
+        let canvas = Controller()
+        canvas.surface = surface
+        surface.canvas = canvas
+        return canvas
+    }
+
+    func updateUIViewController(_ canvas: Controller, context: Context) {
+        canvas.sheet = sheet
+        surface.reader?.updateCoverPanHost()
+    }
+
+    static func dismantleUIViewController(_ canvas: Controller, coordinator: ()) {
+        if let surface = canvas.surface, surface.canvas === canvas {
+            surface.reader?.cancelCover()
+            surface.canvas = nil
+            surface.reader?.updateCoverPanHost()
+        }
+    }
+}
+
 final class ReaderCoverView: UIView {
     let direction: Int
     let targetOffset: CGFloat?
-    let movingPage: UIImageView
+    let movingPage: UIView
     private let exposedStrip = UIView()
 
-    init(frame: CGRect, current: UIImage, adjacent: UIImage, direction: Int, targetOffset: CGFloat?) {
+    init(frame: CGRect, current: UIView, adjacent: UIView, direction: Int, targetOffset: CGFloat?) {
         self.direction = direction
         self.targetOffset = targetOffset
-        movingPage = UIImageView(image: direction > 0 ? current : adjacent)
-        let stationaryPage = UIImageView(image: direction > 0 ? adjacent : current)
+        movingPage = direction > 0 ? current : adjacent
+        let stationaryPage = direction > 0 ? adjacent : current
         super.init(frame: frame)
         isUserInteractionEnabled = false
         accessibilityElementsHidden = true
@@ -153,6 +245,9 @@ struct ReaderTextView: UIViewRepresentable {
     var holdsDisplayedPage = false
     var chapterGeneration = 0
     var coverChapterPreview: (Int) -> (title: String, text: String)? = { _ in nil }
+
+    var coverSurface: ReaderCoverSurface?
+    var coverPanEnabled = true
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
@@ -417,6 +512,25 @@ struct ReaderTextView: UIViewRepresentable {
             previousSwipe = previous
         }
 
+        func updateCoverPanHost() {
+            guard let pan = coverPan, let textView else { return }
+            var host: UIView = textView
+            if let canvas = parent.coverSurface?.canvas?.viewIfLoaded, canvas.window != nil {
+                while !canvas.isDescendant(of: host), let ancestor = host.superview {
+                    host = ancestor
+                }
+                if !canvas.isDescendant(of: host) { host = textView }
+            }
+            if pan.view !== host { host.addGestureRecognizer(pan) }
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            guard gestureRecognizer === coverPan else { return true }
+            guard parent.coverPanEnabled, !parent.holdsDisplayedPage else { return false }
+            guard let canvas = parent.coverSurface?.canvas?.viewIfLoaded else { return true }
+            return canvas.window === touch.window && canvas.bounds.contains(touch.location(in: canvas))
+        }
+
         func gestureRecognizer(
             _ gestureRecognizer: UIGestureRecognizer,
             shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
@@ -439,6 +553,8 @@ struct ReaderTextView: UIViewRepresentable {
             // The scroll reader owns the vertical pan gesture. Horizontal
             // swipe recognizers must be disabled there or UIKit can cancel the
             // pan before the user reaches the end of a long chapter.
+            parent.coverSurface?.reader = self
+            updateCoverPanHost()
             let isCoverMode = parent.pageAnimation == 0 && !parent.isEInkMode
             coverPan?.isEnabled = isCoverMode
             nextSwipe?.isEnabled = !isScrollMode && !isCoverMode
@@ -505,6 +621,8 @@ struct ReaderTextView: UIViewRepresentable {
 
         func invalidate() {
             cancelCover()
+            if let pan = coverPan { pan.view?.removeGestureRecognizer(pan) }
+            if parent.coverSurface?.reader === self { parent.coverSurface?.reader = nil }
             layoutGeneration &+= 1
             resetAutoPage()
             displayLink?.invalidate()
@@ -970,7 +1088,7 @@ struct ReaderTextView: UIViewRepresentable {
             }
         }
 
-        private func chapterPreview(direction: Int, in view: UITextView) -> UIImage? {
+        private func chapterPreview(direction: Int, in view: UITextView) -> ReaderCoverPage? {
             guard let chapter = parent.coverChapterPreview(direction) else { return nil }
             let typography = ReaderTypography(configuration: parent)
             let text = NSMutableAttributedString(string: "")
@@ -985,7 +1103,9 @@ struct ReaderTextView: UIViewRepresentable {
             preview.layoutIfNeeded()
             let pages = ReaderTextPage.layout(in: preview, height: readingViewportHeight(for: view))
             guard let page = direction > 0 ? pages.first : pages.last else { return nil }
-            return image(of: page, in: preview)
+            return ReaderCoverPage(image: image(of: page, in: preview), title: chapter.title,
+                                   number: direction > 0 ? 1 : pages.count,
+                                   total: chapter.text.isEmpty ? nil : pages.count, chapterOffset: direction)
         }
 
         @discardableResult
@@ -996,10 +1116,11 @@ struct ReaderTextView: UIViewRepresentable {
             let index = pageIndex(in: view, pages: pages)
             guard pages.indices.contains(index) else { return false }
             let next = index + direction
-            let adjacent: UIImage
+            let adjacent: ReaderCoverPage
             let target: CGFloat?
             if pages.indices.contains(next) {
-                adjacent = image(of: pages[next], in: view)
+                adjacent = ReaderCoverPage(image: image(of: pages[next], in: view), title: parent.title,
+                                           number: next + 1, total: pages.count, chapterOffset: 0)
                 target = pages[next].offset
             } else {
                 guard let preview = chapterPreview(direction: direction, in: view) else { return false }
@@ -1007,11 +1128,20 @@ struct ReaderTextView: UIViewRepresentable {
                 target = nil
             }
             resetAutoPage()
-            let overlay = ReaderCoverView(frame: view.convert(view.bounds, to: host),
-                                          current: image(of: pages[index], in: view), adjacent: adjacent,
-                                          direction: direction, targetOffset: target)
-            coverView = overlay
-            host.insertSubview(overlay, aboveSubview: view)
+            let current = ReaderCoverPage(image: image(of: pages[index], in: view), title: parent.title,
+                                          number: index + 1, total: pages.count, chapterOffset: 0)
+            if let surface = parent.coverSurface {
+                guard let overlay = surface.canvas?.install(current: current, adjacent: adjacent, textView: view,
+                                                            direction: direction, targetOffset: target) else { return false }
+                coverView = overlay
+            } else {
+                let overlay = ReaderCoverView(frame: view.convert(view.bounds, to: host),
+                                              current: UIImageView(image: current.image),
+                                              adjacent: UIImageView(image: adjacent.image),
+                                              direction: direction, targetOffset: target)
+                host.insertSubview(overlay, aboveSubview: view)
+                coverView = overlay
+            }
             // Keep UIKit hit testing and the original reading position throughout the drag.
             view.layer.mask = CAShapeLayer()
             return true
@@ -1021,6 +1151,7 @@ struct ReaderTextView: UIViewRepresentable {
             guard let overlay = coverView else { return }
             coverView = nil
             awaitingCoverChapter = false
+            parent.coverSurface?.canvas?.removeSheets()
             overlay.removeFromSuperview()
             isTurningPage = false
             if let view = textView { updatePageMask(in: view) }

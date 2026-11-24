@@ -385,11 +385,25 @@ final class ReaderScrollGestureTests: XCTestCase {
     }
 
     func testCoverDragCancelsShortMovementAndTurnsInBothDirections() {
-        let (app, body, page) = launchPagedReader(mode: "0", fontSize: "28")
+        let (app, body, page) = launchPagedReader(mode: "0", fontSize: "28", extraArguments: [
+            "-headerMode", "1", "-tipHeaderLeft", "7", "-footerMode", "0"
+        ])
         let chapter = body.value as? String
-        func drag(from startX: CGFloat, to endX: CGFloat, expectedPage: Int) {
-            let start = body.coordinate(withNormalizedOffset: CGVector(dx: startX, dy: 0.5))
-            let end = body.coordinate(withNormalizedOffset: CGVector(dx: endX, dy: 0.5))
+        let header = app.staticTexts["长夜里的灯"].firstMatch
+        XCTAssertTrue(header.waitForExistence(timeout: 5))
+        let bodyFrame = body.frame
+        let headerY = header.frame.midY
+        let footerY = page.frame.midY
+        XCTAssertLessThan(headerY, bodyFrame.minY)
+        XCTAssertGreaterThan(footerY, bodyFrame.maxY)
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        func drag(from startX: CGFloat, to endX: CGFloat, at y: CGFloat, expectedPage: Int) {
+            func point(_ x: CGFloat) -> XCUICoordinate {
+                origin.withOffset(CGVector(dx: bodyFrame.minX + x * bodyFrame.width - app.frame.minX,
+                                           dy: y - app.frame.minY))
+            }
+            let start = point(startX)
+            let end = point(endX)
             start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.25)
             let settled = expectation(for: NSPredicate(format: "label BEGINSWITH %@", "\(expectedPage)/"),
                                       evaluatedWith: page)
@@ -397,9 +411,11 @@ final class ReaderScrollGestureTests: XCTestCase {
             XCTAssertEqual(body.value as? String, chapter)
             XCTAssertFalse(app.buttons["目录"].exists)
         }
-        drag(from: 0.75, to: 0.65, expectedPage: 1)
-        drag(from: 0.85, to: 0.15, expectedPage: 2)
-        drag(from: 0.15, to: 0.85, expectedPage: 1)
+        drag(from: 0.75, to: 0.65, at: bodyFrame.midY, expectedPage: 1)
+        drag(from: 0.85, to: 0.15, at: bodyFrame.midY, expectedPage: 2)
+        drag(from: 0.15, to: 0.85, at: bodyFrame.midY, expectedPage: 1)
+        drag(from: 0.85, to: 0.15, at: headerY, expectedPage: 2)
+        drag(from: 0.15, to: 0.85, at: footerY, expectedPage: 1)
     }
 
     func testCoverTapAcrossChapterBoundaryShowsHeadingOnFirstPage() throws {
@@ -459,10 +475,12 @@ final class ReaderScrollGestureTests: XCTestCase {
         try checkChapterHeading()
     }
 
-    private func launchPagedReader(mode: String, fontSize: String) -> (XCUIApplication, XCUIElement, XCUIElement) {
+    private func launchPagedReader(mode: String, fontSize: String,
+                                   extraArguments: [String] = []) -> (XCUIApplication, XCUIElement, XCUIElement) {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiScrollRegression", "-uiPagingDiagnostics", "-pageAnim", mode, "-themeMode", "1", "-tipFooterRight", "6", "-textSize", fontSize]
+        app.launchArguments += extraArguments
         app.launch()
         let body = app.textViews["reader.text"]
         XCTAssertTrue(body.waitForExistence(timeout: 20))

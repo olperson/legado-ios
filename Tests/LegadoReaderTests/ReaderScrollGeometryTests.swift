@@ -1,3 +1,4 @@
+import CoreImage
 import ImageIO
 import SwiftUI
 import UIKit
@@ -154,7 +155,7 @@ final class ReaderPagingGeometryTests: XCTestCase {
             let sign: CGFloat = distance < 0 ? -1 : 1
             coordinator.handleCoverPan(.began, translationX: 8 * sign, velocityX: 0)
             coordinator.handleCoverPan(.changed, translationX: width * 0.4 * sign, velocityX: 0)
-            let overlay = try XCTUnwrap(view.superview?.subviews.compactMap { $0 as? ReaderCoverView }.first)
+            let overlay = try XCTUnwrap(findCoverView(host.view))
             let startX = sign < 0 ? 0 : -width
             XCTAssertEqual(overlay.movingPage.frame.minX, startX + width * 0.4 * sign, accuracy: 1)
             coordinator.handleCoverPan(.changed, translationX: distance, velocityX: 0)
@@ -177,6 +178,85 @@ final class ReaderPagingGeometryTests: XCTestCase {
         try await drag(from: 1, by: -width * 0.75, end: .cancelled, expectedPage: 1)
         try await drag(from: 1, by: -width * 0.75, end: .ended, expectedPage: 2)
         try await drag(from: 2, by: width * 0.75, end: .ended, expectedPage: 1)
+    }
+
+    func testCoverMovesHeaderFooterAndBackgroundAcrossTheFullCanvas() async throws {
+        let surface = ReaderCoverSurface()
+        var reader = pagedReader(text: String(repeating: "满屏覆盖翻页。\n", count: 100), title: "第一章", animation: 0)
+        reader.coverSurface = surface
+        let root = ZStack {
+            CoverPageLandmarks(number: 1)
+            reader.frame(width: 200, height: 220)
+        }
+        .overlay {
+            ReaderCoverCanvas(surface: surface) { page, textFrame in
+                AnyView(ZStack(alignment: .topLeading) {
+                    CoverPageLandmarks(number: page.number)
+                    Image(uiImage: page.image).resizable()
+                        .frame(width: textFrame.width, height: textFrame.height)
+                        .offset(x: textFrame.minX, y: textFrame.minY)
+                })
+            }
+        }
+        .ignoresSafeArea()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let host = UIHostingController(rootView: root)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        host.view.layoutIfNeeded()
+        await Task.yield()
+        let view = try XCTUnwrap(findTextView(host.view))
+        let coordinator = try XCTUnwrap(view.delegate as? ReaderTextView.Coordinator)
+        defer { coordinator.invalidate() }
+
+        let size = host.view.bounds.size
+        let context = CIContext()
+        let space = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
+        func snapshot() throws -> CIImage {
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            let image = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+                XCTAssertTrue(host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true))
+            }
+            return CIImage(cgImage: try XCTUnwrap(image.cgImage))
+        }
+        func pixel(_ image: CIImage, _ x: CGFloat, _ y: CGFloat) -> [UInt8] {
+            // Core Image measures y from the bottom of the bitmap.
+            let sample = CGRect(x: floor(size.width * x), y: floor(size.height * (1 - y)), width: 1, height: 1)
+            var rgba = [UInt8](repeating: 0, count: 4)
+            rgba.withUnsafeMutableBytes { buffer in
+                context.render(image, toBitmap: buffer.baseAddress!, rowBytes: 4,
+                               bounds: sample, format: .RGBA8, colorSpace: space)
+            }
+            return rgba
+        }
+        let original = try snapshot()
+        coordinator.handleCoverPan(.began, translationX: -8, velocityX: 0)
+        coordinator.handleCoverPan(.changed, translationX: -size.width / 2, velocityX: 0)
+        let cover = try XCTUnwrap(findCoverView(host.view))
+        XCTAssertEqual(cover.convert(cover.bounds, to: host.view), host.view.bounds)
+        let dragging = try snapshot()
+        // The header, patterned wallpaper and footer must travel with the outgoing page.
+        for y in [CGFloat(0.1), 0.2, 0.9] {
+            XCTAssertNotEqual(pixel(original, 0.25, y), pixel(original, 0.75, y))
+            XCTAssertEqual(pixel(dragging, 0.25, y), pixel(original, 0.75, y))
+        }
+        XCTAssertEqual(pixel(dragging, 0.75, 0.9), [0, 255, 0, 255],
+                       "The exposed footer must show the green destination marker")
+        coordinator.handleCoverPan(.cancelled, translationX: -size.width / 2, velocityX: 0)
+        for _ in 0..<100 where cover.superview != nil { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertNil(cover.superview)
+        let restored = try snapshot()
+        for y in [CGFloat(0.1), 0.2, 0.9] {
+            for x in [CGFloat(0.25), 0.75] {
+                XCTAssertEqual(pixel(restored, x, y), pixel(original, x, y))
+            }
+        }
+    }
+
+    private func findCoverView(_ view: UIView) -> ReaderCoverView? {
+        (view as? ReaderCoverView) ?? view.subviews.lazy.compactMap(findCoverView).first
     }
 
     private func findTextView(_ view: UIView) -> UITextView? {
@@ -203,6 +283,24 @@ final class ReaderPagingGeometryTests: XCTestCase {
             onReachedEnd: { _ in }, onReachedStart: { _ in }, onEnteredPrevious: { _ in },
             onEnteredContinuation: { _ in }, onDeferredRender: {}, onCancelNextLoading: {},
             onPageChanged: {}, onTapAction: { _ in })
+    }
+}
+
+private struct CoverPageLandmarks: View {
+    let number: Int
+
+    var body: some View {
+        GeometryReader { geometry in
+            let size = geometry.size
+            HStack(spacing: 0) {
+                Color.black
+                Color.white
+            }
+            Color(uiColor: .red).frame(width: 30, height: 30)
+                .position(x: size.width * 0.75, y: size.height * 0.1)
+            Color(uiColor: number == 1 ? .blue : .green).frame(width: 30, height: 30)
+                .position(x: size.width * 0.75, y: size.height * 0.9)
+        }
     }
 }
 

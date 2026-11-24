@@ -1,0 +1,76 @@
+name: Reader cover tests
+on:
+  push:
+    branches: [main]
+    paths:
+      - App/Features/Reader/ReaderTextView.swift
+      - App/Features/Reader/ReaderView.swift
+      - Tests/LegadoReaderTests/ReaderScrollGeometryTests.swift
+      - Tests/LegadoReaderUITests/ReaderScrollGestureTests.swift
+      - .github/workflows/validate-reader-cover.yml
+
+permissions:
+  contents: read
+
+jobs:
+  cover:
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test pagination and cover gestures on an iPhone
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d /Applications/Xcode_26.1.1.app ]]; then
+            export DEVELOPER_DIR=/Applications/Xcode_26.1.1.app/Contents/Developer
+          fi
+          xcodebuild -version
+          sdk=$(xcrun --sdk iphonesimulator --show-sdk-version)
+          device=$(xcrun simctl list devices available -j | python3 -c '
+          import json, re, sys
+          sdk = tuple(map(int, sys.argv[1].split(".")))
+          phones = []
+          for runtime, devices in json.load(sys.stdin)["devices"].items():
+              match = re.fullmatch(r"com\.apple\.CoreSimulator\.SimRuntime\.iOS-([\d-]+)", runtime)
+              if match:
+                  version = tuple(map(int, match[1].split("-")))
+                  if version[:2] <= sdk[:2]:
+                      phones.extend((version, d["name"], d["udid"]) for d in devices
+                                    if d["isAvailable"] and d["name"].startswith("iPhone"))
+          if not phones:
+              sys.exit("No iPhone simulator for SDK " + sys.argv[1])
+          print(max(phones)[2])' "$sdk")
+          xcrun simctl bootstatus "$device" -b
+          run_tests() {
+            local scheme=$1 minimum=$2
+            shift 2
+            local selectors=()
+            for selector in "$@"; do selectors+=("-only-testing:$scheme/$selector"); done
+            local result="$RUNNER_TEMP/$scheme.xcresult" log="$RUNNER_TEMP/$scheme.log"
+            local status=0
+            xcodebuild -project Legado.xcodeproj -scheme "$scheme" -configuration Debug \
+              -destination "platform=iOS Simulator,id=$device" -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+              -onlyUsePackageVersionsFromResolvedFile -parallel-testing-enabled NO \
+              -resultBundlePath "$result" "${selectors[@]}" CODE_SIGNING_ALLOWED=NO test \
+              2>&1 | tee "$log" || status=$?
+            if [[ "$status" != 0 ]]; then
+              awk '/error: |Test Case .* failed/ && ++n <= 8 { gsub(/%/, "%25"); print "::error::" $0 }' "$log"
+            fi
+            local summary
+            summary=$(xcrun xcresulttool get test-results summary --path "$result") || return 1
+            jq -r --arg scheme "$scheme" \
+              '"::notice::\($scheme) — \(.passedTests) passed, \(.failedTests) failed, \(.skippedTests) skipped"' <<< "$summary"
+            jq -e --argjson min "$minimum" \
+              '.passedTests >= $min and .failedTests == 0 and .skippedTests == 0' <<< "$summary" >/dev/null || return 1
+            return "$status"
+          }
+          failed=0
+          run_tests LegadoReaderTests 5 ReaderPagingGeometryTests || failed=1
+          sh scripts/prepare-source-import-fixture.sh "$device"
+          run_tests LegadoReaderUITests 2 \
+            ReaderScrollGestureTests/testCoverDragCancelsShortMovementAndTurnsInBothDirections \
+            ReaderScrollGestureTests/testCoverTapAcrossChapterBoundaryShowsHeadingOnFirstPage || failed=1
+          exit "$failed"

@@ -49,6 +49,7 @@ struct ReaderView: View {
     @State private var speechPageIndex = 0
     @State private var currentPage = 1
     @State private var totalPages = 1
+    @State private var coverSurface = ReaderCoverSurface()
     @State private var readerRenderRevision = 0
     @State private var isWaitingForNextChapter = false
     @State private var isWaitingForPreviousChapter = false
@@ -474,18 +475,42 @@ struct ReaderView: View {
             readerContent
             readerMenuDismissOverlay
         }
-        .background {
-            ZStack {
-                backgroundColor
-                if let backgroundImage = activeBackgroundImage {
-                    Image(uiImage: backgroundImage)
-                        .resizable()
-                        .scaledToFill()
-                }
+        .background { readerPaperBackground.ignoresSafeArea() }
+    }
+
+    private var readerPaperBackground: some View {
+        backgroundColor.overlay {
+            if let backgroundImage = activeBackgroundImage {
+                Image(uiImage: backgroundImage)
+                    .resizable()
+                    .scaledToFill()
             }
-            .clipped()
-            .ignoresSafeArea()
         }
+        .clipped()
+    }
+
+    private func coverSheet(_ page: ReaderCoverPage, textFrame: CGRect) -> some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .topLeading) {
+                readerPaperBackground
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                if headerVisible {
+                    readerTipBar(isHeader: true, page: page)
+                        .frame(width: textFrame.width, height: max(0, textFrame.minY), alignment: .bottom)
+                        .offset(x: textFrame.minX)
+                }
+                Image(uiImage: page.image)
+                    .resizable()
+                    .frame(width: textFrame.width, height: textFrame.height)
+                    .offset(x: textFrame.minX, y: textFrame.minY)
+                readerFooter(page: page)
+                    .frame(width: textFrame.width, height: max(0, geometry.size.height - textFrame.maxY), alignment: .top)
+                    .offset(x: textFrame.minX, y: textFrame.maxY)
+            }
+        }
+        .ignoresSafeArea()
+        .environment(\.colorScheme, resolvedStyle.id == "night" ? .dark : .light)
+        .environment(\.dynamicTypeSize, dynamicTypeSize)
     }
 
     private var waitingForChapter: Bool {
@@ -515,10 +540,20 @@ struct ReaderView: View {
                     .transaction { $0.animation = nil }
                     .allowsHitTesting(!waitingForChapter)
                     .accessibilityHidden(waitingForChapter)
-                readerFooter
+                readerFooter()
             }
             .frame(maxWidth: readingColumnMaxWidth)
             .frame(maxWidth: .infinity)
+            .overlay {
+                if pageAnimation == 0, themeMode != "3", !model.hasImageContent {
+                    ReaderCoverCanvas(surface: coverSurface) { page, textFrame in
+                        AnyView(coverSheet(page, textFrame: textFrame))
+                    }
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                }
+            }
             .overlay {
                 if waitingForChapter, model.isWaitingForSource || model.onlineSourceID == nil {
                     ReaderChapterLoadingOverlay(title: model.title, foreground: foregroundColor, background: backgroundColor)
@@ -583,15 +618,19 @@ struct ReaderView: View {
         chapterCommentsTarget = target
     }
 
-    @ViewBuilder private var readerFooter: some View {
-        if pageAnimation != 3, model.commentsTarget(at: model.currentIndex) != nil {
+    @ViewBuilder private func readerFooter(page: ReaderCoverPage? = nil) -> some View {
+        let chapterNumber = model.currentChapterNumber + (page?.chapterOffset ?? 0)
+        let indices = model.directory.readableIndices
+        let index = indices.indices.contains(chapterNumber - 1) ? indices[chapterNumber - 1] : model.currentIndex
+        let lastPage = page.map { $0.total == $0.number } ?? (!readerPageRanges.isEmpty && currentPage == totalPages)
+        if pageAnimation != 3, model.commentsTarget(at: index) != nil {
             // A changing footer height would repaginate the text precisely when the last page appears.
             HStack(spacing: 0) {
-                if footerVisible { readerTipBar(isHeader: false) }
+                if footerVisible { readerTipBar(isHeader: false, page: page) }
                 Spacer(minLength: 0)
-                if !readerPageRanges.isEmpty, currentPage == totalPages {
+                if lastPage {
                     Button {
-                        openChapterComments(at: model.currentIndex)
+                        openChapterComments(at: index)
                     } label: {
                         Label("本章评论", systemImage: "text.bubble")
                             .font(.subheadline)
@@ -606,7 +645,7 @@ struct ReaderView: View {
             }
             .frame(minHeight: 44)
         } else if footerVisible {
-            readerTipBar(isHeader: false)
+            readerTipBar(isHeader: false, page: page)
         }
     }
 
@@ -763,7 +802,9 @@ struct ReaderView: View {
             onTapAction: handleTapAction,
             holdsDisplayedPage: waitingForChapter,
             chapterGeneration: model.displayedChapterGeneration,
-            coverChapterPreview: { model.coverChapterPreview(direction: $0) }
+            coverChapterPreview: { model.coverChapterPreview(direction: $0) },
+            coverSurface: coverSurface,
+            coverPanEnabled: !pausesAutoReading && !waitingForChapter
         )
     }
 
@@ -840,27 +881,26 @@ struct ReaderView: View {
     }
 
 
-    private func readerTipBar(isHeader: Bool) -> some View {
-        TimelineView(.periodic(from: .now, by: 30)) { context in
-            readerTipRow(
-                isHeader ? [tipHeaderLeft, tipHeaderMiddle, tipHeaderRight] : [tipFooterLeft, tipFooterMiddle, tipFooterRight],
-                date: context.date,
-                showDivider: isHeader ? showHeaderLine : showFooterLine,
-                isHeader: isHeader
-            )
-            .padding(.top, isHeader ? headerPaddingTop : footerPaddingTop)
-            .padding(.bottom, isHeader ? headerPaddingBottom : footerPaddingBottom)
+    @ViewBuilder private func readerTipBar(isHeader: Bool, page: ReaderCoverPage? = nil) -> some View {
+        if let page {
+            readerTipRow(isHeader: isHeader, date: .now, page: page)
+        } else {
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                readerTipRow(isHeader: isHeader, date: context.date, page: nil)
+            }
+            .allowsHitTesting(false)
         }
-        .allowsHitTesting(false)
     }
 
-    private func readerTipRow(_ values: [Int], date: Date, showDivider: Bool, isHeader: Bool) -> some View {
-        HStack(spacing: 8) {
-            Text(readerTipText(values[0], date: date))
+    private func readerTipRow(isHeader: Bool, date: Date, page: ReaderCoverPage?) -> some View {
+        let values = isHeader ? [tipHeaderLeft, tipHeaderMiddle, tipHeaderRight] : [tipFooterLeft, tipFooterMiddle, tipFooterRight]
+        let showDivider = isHeader ? showHeaderLine : showFooterLine
+        return HStack(spacing: 8) {
+            Text(readerTipText(values[0], date: date, page: page))
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Text(readerTipText(values[1], date: date))
+            Text(readerTipText(values[1], date: date, page: page))
                 .frame(maxWidth: .infinity, alignment: .center)
-            Text(readerTipText(values[2], date: date))
+            Text(readerTipText(values[2], date: date, page: page))
                 .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .font(.system(size: 12))
@@ -871,27 +911,38 @@ struct ReaderView: View {
         .overlay(alignment: .bottom) {
             if showDivider { Divider().overlay(foregroundColor.opacity(0.35)) }
         }
+        .padding(.top, isHeader ? headerPaddingTop : footerPaddingTop)
+        .padding(.bottom, isHeader ? headerPaddingBottom : footerPaddingBottom)
     }
 
-    private func readerTipText(_ value: Int, date: Date) -> String {
+    private func readerTipText(_ value: Int, date: Date, page: ReaderCoverPage?) -> String {
         var time: String { date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits)) }
         var battery: Int {
             let level = UIDevice.current.batteryLevel
             return level >= 0 ? Int((level * 100).rounded()) : 100
         }
-        var progressText: String { String(format: "%.1f%%", chapterProgress * 100) }
+        let number = page?.number ?? currentPage
+        let total = page == nil ? totalPages : page?.total
+        let chapter = model.currentChapterNumber + (page?.chapterOffset ?? 0)
+        var pageText: String { total.map { "\(number)/\($0)" } ?? "" }
+        var progressText: String {
+            guard let total else { return "" }
+            let progress = readingProgress(chapter: chapter, page: number, total: total,
+                                           hasBody: page != nil || (model.hasLoadedCurrentChapter && !model.content.isEmpty))
+            return String(format: "%.1f%%", progress * 100)
+        }
         switch value {
-        case 1: return model.title
+        case 1: return page?.title ?? model.title
         case 2: return time
         case 3: return "▰"
-        case 4: return "\(currentPage)/\(totalPages)"
+        case 4: return pageText
         case 5: return progressText
-        case 6: return "\(currentPage)/\(totalPages)  \(progressText)"
+        case 6: return total == nil ? "" : "\(pageText)  \(progressText)"
         case 7: return book.name
         case 8: return "\(time) ▰"
         case 9: return "\(time) \(battery)%"
         case 10: return "\(battery)%"
-        case 11: return "\(model.currentChapterNumber)/\(model.directory.readableIndices.count)"
+        case 11: return "\(chapter)/\(model.directory.readableIndices.count)"
         default: return ""
         }
     }
@@ -909,17 +960,16 @@ struct ReaderView: View {
     }
 
     private var chapterProgress: Double {
+        readingProgress(chapter: model.currentChapterNumber, page: currentPage, total: totalPages,
+                        hasBody: model.hasLoadedCurrentChapter && !model.content.isEmpty)
+    }
+
+    private func readingProgress(chapter: Int, page: Int, total: Int, hasBody: Bool) -> Double {
         let count = model.directory.readableIndices.count
-        guard count > 0, model.currentChapterNumber > 0 else { return 0 }
-        return (Double(model.currentChapterNumber - 1) + chapterPageFraction) / Double(count)
+        guard count > 0, chapter > 0 else { return 0 }
+        let fraction = total > 1 ? min(max(Double(page - 1) / Double(total - 1), 0), 1) : 1
+        return (Double(chapter - 1) + (hasBody ? fraction : 0)) / Double(count)
     }
-
-    private var chapterPageFraction: Double {
-        guard model.hasLoadedCurrentChapter, !model.content.isEmpty else { return 0 }
-        guard totalPages > 1 else { return 1 }
-        return min(max(Double(max(currentPage - 1, 0)) / Double(totalPages - 1), 0), 1)
-    }
-
 
     private var readerTopChrome: some View {
         HStack(spacing: 4) {
