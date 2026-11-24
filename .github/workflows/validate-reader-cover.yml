@@ -7,8 +7,10 @@ on:
       - App/Features/Reader/ReaderView.swift
       - App/Features/Reader/ReaderViewModel.swift
       - scripts/fixtures/SourceImportFixture.swift
+      - scripts/prepare-source-import-fixture.sh
       - Tests/LegadoReaderTests/ReaderScrollGeometryTests.swift
       - Tests/LegadoReaderUITests/ReaderScrollGestureTests.swift
+      - Tests/LegadoReaderUITests/RuleEditorUITests.swift
       - .github/workflows/validate-reader-cover.yml
 
 permissions:
@@ -20,7 +22,7 @@ concurrency:
 
 jobs:
   cover:
-    runs-on: macos-15-intel
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

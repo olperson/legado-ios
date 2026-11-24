@@ -44,5 +44,17 @@ python3 "$legado_fixture_repo/scripts/fixtures/make-epub.py" "$legado_fixture_ap
 # The font stays in this local, simulator-only fixture.
 cp "/System/Library/Fonts/Supplemental/Arial.ttf" "$legado_fixture_app/Reader-Test.ttf"
 xcrun simctl install "$legado_fixture_device" "$legado_fixture_app"
-xcrun simctl launch --terminate-running-process "$legado_fixture_device" com.epiboly.legado.source-import-fixtures
+legado_fixture_id=com.epiboly.legado.source-import-fixtures
+xcrun simctl launch --terminate-running-process "$legado_fixture_device" "$legado_fixture_id"
+legado_fixture_data=$(xcrun simctl get_app_container "$legado_fixture_device" "$legado_fixture_id" data)
+legado_fixture_attempt=0
+while [ ! -s "$legado_fixture_data/Documents/TXT-Paging.txt" ]; do
+    if [ "$legado_fixture_attempt" -ge 30 ]; then
+        printf 'Missing or empty TXT-Paging.txt in %s/Documents on simulator %s\n' "$legado_fixture_data" "$legado_fixture_device" >&2
+        ls -la "$legado_fixture_data/Documents" >&2
+        exit 1
+    fi
+    sleep 1
+    legado_fixture_attempt=$((legado_fixture_attempt + 1))
+done
 printf 'JSON, TXT, EPUB and TTF import fixtures are ready in Files > On My iPhone > 书源导入测试.\n'

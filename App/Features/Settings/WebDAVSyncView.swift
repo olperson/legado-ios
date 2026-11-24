@@ -14,6 +14,8 @@ struct WebDAVSyncView: View {
     @State private var message: String?
     @State private var history: [WebDAVBackupFile]?
     @State private var picksFile = false
+    @State private var pickedFile: SourceImportFile?
+    @State private var pickerHasDismissed = false
     @State private var importCopy: Task<TemporaryBackup, Error>?
     @State private var exportedFile: TemporaryBackup?
     @State private var review: Review?
@@ -70,22 +72,22 @@ struct WebDAVSyncView: View {
         }
         .onChange(of: account) { _ in history = nil }
         .onDisappear { importCopy?.cancel() }
-        .fileImporter(isPresented: $picksFile, allowedContentTypes: [.zip]) { result in
-            do {
-                let file = SourceImportFile(url: try result.get())
-                perform("正在读取 ZIP…") {
-                    let task = Task.detached(priority: .userInitiated) { try TemporaryBackup.importCopy(of: file) }
-                    importCopy = task
-                    defer { importCopy = nil }
-                    let copy = try await task.value
-                    if !task.isCancelled { review = .local(copy) }
-                }
-            } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSUserCancelledError {
-                return
-            } catch { message = error.localizedDescription }
+        .sheet(isPresented: $picksFile, onDismiss: {
+            pickerHasDismissed = true
+            readPickedBackupWhenReady()
+        }) {
+            ReadingImportPicker(contentTypes: [.zip], allowsMultipleSelection: false,
+                                directoryURL: try? WebDAVBackupService.localBackupDirectory(), asCopy: false) { urls in
+                pickedFile = urls.first.map { SourceImportFile(url: $0) }
+                picksFile = false
+                readPickedBackupWhenReady()
+            } onCancel: {
+                pickedFile = nil
+                picksFile = false
+            }
         }
         .sheet(item: $exportedFile) { file in
-            FileExportPicker(url: file.url) { saved in
+            FileExportPicker(url: file.url, directoryURL: try? WebDAVBackupService.localBackupDirectory()) { saved in
                 exportedFile = nil
                 if saved { message = "已导出 ZIP 备份。" }
             }
@@ -166,13 +168,28 @@ struct WebDAVSyncView: View {
                     exportedFile = TemporaryBackup(url: url, name: url.lastPathComponent)
                 }
             }
-            Button("选择 ZIP 文件恢复") { picksFile = true }
+            Button("选择 ZIP 文件恢复") {
+                pickerHasDismissed = false
+                picksFile = true
+            }
         } header: {
             Text("本地备份")
         } footer: {
             Text("ZIP 包含书籍、设置和已保存的账户密码，请妥善保管。自动本地备份位于「文件」中本应用的 Backups 文件夹，卸载前请将备份另存到应用外。")
         }
         .disabled(work != nil)
+    }
+
+    private func readPickedBackupWhenReady() {
+        guard pickerHasDismissed, let file = pickedFile else { return }
+        pickedFile = nil
+        perform("正在读取 ZIP…") {
+            let task = Task.detached(priority: .userInitiated) { try TemporaryBackup.importCopy(of: file) }
+            importCopy = task
+            defer { importCopy = nil }
+            let copy = try await task.value
+            if !task.isCancelled { review = .local(copy) }
+        }
     }
 
     private func historySection(_ files: [WebDAVBackupFile]) -> some View {

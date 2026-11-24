@@ -587,23 +587,60 @@ final class RuleEditorUITests: XCTestCase {
 }
 
 @MainActor
+func importFixtureItem(_ prefix: String, in app: XCUIApplication) -> XCUIElement {
+    let name = NSPredicate(format: "label BEGINSWITH %@", prefix)
+    let row = app.cells.matching(name).firstMatch
+    if row.exists { return row }
+    return app.descendants(matching: .any).matching(name).firstMatch
+}
+
+@MainActor
 func openImportFixtureFolder(in app: XCUIApplication) {
-    let pickerFiles = app.collectionViews["File View"].cells
-    let fixtureJSON = pickerFiles.matching(NSPredicate(format: "label BEGINSWITH %@", "JSON-Source")).firstMatch
-    let fixtures = pickerFiles.matching(NSPredicate(format: "label BEGINSWITH %@", "书源导入测试")).firstMatch
-    if !fixtureJSON.waitForExistence(timeout: 3) {
-        if !fixtures.exists {
-            let browse = app.buttons.matching(NSPredicate(format: "label IN %@", ["Browse", "浏览", "Locations", "位置"])).firstMatch
-            if browse.exists { browse.tap() }
-            if !fixtures.waitForExistence(timeout: 2) {
-                let local = app.descendants(matching: .any).matching(NSPredicate(
-                    format: "label CONTAINS %@ OR label CONTAINS %@ OR label == %@", "我的 iPhone", "我的iPhone", "On My iPhone"
-                )).firstMatch
-                XCTAssertTrue(local.waitForExistence(timeout: 5))
-                local.tap()
-            }
-        }
-        XCTAssertTrue(fixtures.waitForExistence(timeout: 10), "Run sh scripts/prepare-source-import-fixture.sh <simulator-UUID>")
-        fixtures.tap()
+    let folderNames = ["书源导入测试", "SourceImportFixtures"]
+    let folder = NSPredicate(format: "label BEGINSWITH %@ OR label BEGINSWITH %@", folderNames[0], folderNames[1])
+    let localNames = ["On My iPhone", "我的 iPhone", "我的iPhone"]
+    let local = NSPredicate(format: "label BEGINSWITH %@ OR label CONTAINS %@ OR label CONTAINS %@",
+                            localNames[0], localNames[1], localNames[2])
+    let browseNames = ["Browse", "浏览", "Locations", "位置"]
+    let browseTab = app.tabBars.buttons.matching(NSPredicate(format: "label IN %@", browseNames)).firstMatch
+    if browseTab.isHittable && !browseTab.isSelected { browseTab.tap() }
+
+    func atFolder(_ names: [String]) -> Bool {
+        app.navigationBars.matching(NSPredicate(format: "identifier IN %@ OR label IN %@", names, names)).firstMatch.exists
     }
+    // File rows can be presented in a list or grid. Match within their content so
+    // that an identically named navigation title cannot masquerade as a location.
+    func row(_ predicate: NSPredicate) -> XCUIElement {
+        let cell = app.cells.matching(predicate).firstMatch
+        if cell.exists { return cell }
+        return app.collectionViews.descendants(matching: .any).matching(predicate).firstMatch
+    }
+    for _ in 0..<4 {
+        if atFolder(folderNames) { return }
+        let fixtures = row(folder)
+        if fixtures.waitForExistence(timeout: atFolder(localNames) ? 6 : 1), fixtures.isHittable {
+            fixtures.tap()
+            return
+        }
+        let onMyPhone = row(local)
+        if onMyPhone.isHittable {
+            onMyPhone.tap()
+            continue
+        }
+        let back = app.navigationBars.buttons.matching(NSPredicate(
+            format: "label IN %@ OR identifier == %@", browseNames + localNames + ["Back", "返回"], "BackButton"
+        )).firstMatch
+        if back.isHittable {
+            back.tap()
+        } else if browseTab.isHittable {
+            browseTab.tap()
+        } else {
+            break
+        }
+    }
+    let tree = app.debugDescription.split(separator: "\n")
+    let locations = tree.filter { $0.contains("NavigationBar,") }.suffix(4)
+    let items = tree.filter { $0.contains("Cell,") || $0.contains("Button,") }.suffix(12)
+    let state = (Array(locations) + Array(items)).map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: " | ")
+    XCTFail("Files could not open the import fixture folder. \(state.prefix(1400))")
 }

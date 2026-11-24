@@ -222,6 +222,14 @@ final class WebDAVBackupService: ObservableObject {
         }
     }
 
+    nonisolated static func localBackupDirectory() throws -> URL {
+        let files = FileManager.default
+        let documents = try files.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let directory = documents.appendingPathComponent("Backups", isDirectory: true)
+        try files.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
     nonisolated static func saveLocal(_ archive: URL, directory: URL) throws {
         let files = FileManager.default
         try files.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -240,9 +248,9 @@ final class WebDAVBackupService: ObservableObject {
             var firstError: Error?
             if destinations.contains(.local) {
                 do {
-                    let directory = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask,
-                                                                appropriateFor: nil, create: true).appendingPathComponent("Backups", isDirectory: true)
-                    try await Task.detached(priority: .utility) { try Self.saveLocal(local.url, directory: directory) }.value
+                    try await Task.detached(priority: .utility) {
+                        try Self.saveLocal(local.url, directory: Self.localBackupDirectory())
+                    }.value
                     didSave(.local)
                 } catch { firstError = error }
             }

@@ -251,13 +251,16 @@ private struct ReadingLocalBookFileImporterModifier: ViewModifier {
 struct ReadingImportPicker: UIViewControllerRepresentable {
     let contentTypes: [UTType]
     let allowsMultipleSelection: Bool
+    var directoryURL: URL? = nil
+    var asCopy = true
     let onPick: @MainActor ([URL]) -> Void
     let onCancel: @MainActor () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: contentTypes, asCopy: true)
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: contentTypes, asCopy: asCopy)
+        picker.directoryURL = directoryURL
         picker.allowsMultipleSelection = allowsMultipleSelection
         picker.shouldShowFileExtensions = true
         picker.delegate = context.coordinator

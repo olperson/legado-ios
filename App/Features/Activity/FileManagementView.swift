@@ -325,10 +325,12 @@ struct FileManagementView: View {
 
 struct FileExportPicker: UIViewControllerRepresentable {
     let url: URL
+    var directoryURL: URL? = nil
     let onCompletion: (Bool) -> Void
     func makeCoordinator() -> Coordinator { Coordinator(onCompletion) }
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
+        picker.directoryURL = directoryURL
         picker.delegate = context.coordinator
         return picker
     }
