@@ -168,11 +168,6 @@ private struct ReaderTextColorSheet: View {
         return UInt32(digits, radix: 16)
     }
 
-    private func choose(_ value: String) {
-        hex = value
-        if let rgb = Self.parseRGB(value) { select(UIColor(hex: rgb)) }
-    }
-
     var body: some View {
         let rgb = Self.parseRGB(hex)
         ReadingNavigationStack {
@@ -182,7 +177,13 @@ private struct ReaderTextColorSheet: View {
                         ForEach(Self.swatches, id: \.rgb) { swatch in
                             let code = String(format: "%06X", swatch.rgb)
                             let selected = rgb == swatch.rgb
-                            Button { choose("#" + code) } label: {
+                            Button {
+                                if hex == "#" + code {
+                                    select(UIColor(hex: swatch.rgb))
+                                } else {
+                                    hex = "#" + code
+                                }
+                            } label: {
                                 Circle()
                                     .fill(Color(uiColor: UIColor(hex: swatch.rgb)))
                                     .overlay { Circle().strokeBorder(Color.secondary, lineWidth: 1) }
@@ -205,7 +206,7 @@ private struct ReaderTextColorSheet: View {
                     }
                 }
                 Section("自定义颜色") {
-                    TextField("十六进制 RGB", text: Binding(get: { hex }, set: choose))
+                    TextField("十六进制 RGB", text: $hex)
                         .font(.body.monospaced())
                         .keyboardType(.asciiCapable)
                         .textInputAutocapitalization(.characters)
@@ -219,6 +220,9 @@ private struct ReaderTextColorSheet: View {
             }
             .navigationTitle("字体颜色")
             .navigationBarTitleDisplayMode(.inline)
+            .onChange(of: hex) { value in
+                if let rgb = Self.parseRGB(value) { select(UIColor(hex: rgb)) }
+            }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") { dismiss() }
