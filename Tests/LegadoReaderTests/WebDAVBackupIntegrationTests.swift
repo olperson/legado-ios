@@ -20,6 +20,12 @@ final class WebDAVBackupIntegrationTests: XCTestCase {
         try Data("第一章\n这是离线正文。".utf8).write(to: localBook)
         let book = Book(bookUrl: localBook.absoluteString, name: "海上", author: "读者")
         try await from.replaceBooks([book])
+        let previousAccount = try WebDAVAccount.load()
+        defer {
+            if let previousAccount { try? previousAccount.save() } else { try? WebDAVAccount.remove() }
+        }
+        let savedAccount = WebDAVAccount(directory: "https://restore.example.invalid/阅读", username: "reader", password: UUID().uuidString)
+        try savedAccount.save()
         let service = WebDAVBackupService()
         let archive = try await service.createArchive(database: from)
         defer { try? files.removeItem(at: archive) }
@@ -31,6 +37,8 @@ final class WebDAVBackupIntegrationTests: XCTestCase {
         XCTAssertEqual(try handle.read(upToCount: 4), Data([80, 75, 3, 4]))
         try handle.close()
 
+        try WebDAVAccount.remove()
+        XCTAssertNil(try WebDAVAccount.load())
         UserDefaults.standard.removeObject(forKey: pref)
         let previouslyEmpty = try await fresh.loadBooks()
         XCTAssertTrue(previouslyEmpty.isEmpty)
@@ -44,6 +52,7 @@ final class WebDAVBackupIntegrationTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: restoredURL, encoding: .utf8), "第一章\n这是离线正文。")
         XCTAssertEqual(UserDefaults.standard.string(forKey: pref), "已选字体颜色")
         XCTAssertEqual(refreshes, 1)
+        XCTAssertEqual(try WebDAVAccount.load(), savedAccount)
     }
 
     func testNewWebDAVDirectoryAndRestoringASelectedVersion() async throws {
