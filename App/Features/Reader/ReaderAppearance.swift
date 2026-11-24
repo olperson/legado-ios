@@ -110,6 +110,7 @@ struct ReaderTextColorPicker: View {
     let isEInk: Bool
     let defaultForeground: UIColor?
     @AppStorage(ReaderTextColors.storageKey) private var colors = ReaderTextColors()
+    @State private var isChoosing = false
 
     init(theme: String, isEInk: Bool, defaultForeground: UIColor? = nil) {
         self.theme = theme
@@ -121,12 +122,111 @@ struct ReaderTextColorPicker: View {
         let custom = colors.customForeground(for: theme)
         let foreground = isEInk ? ReaderStylePreset.eInk.foreground
             : custom ?? defaultForeground ?? ReaderStylePreset.resolve(theme).foreground
-        ColorPicker("字体颜色", selection: Binding(
-            get: { Color(uiColor: foreground) },
-            set: { value in colors.setForeground(UIColor(value), for: theme) }
-        ), supportsOpacity: false)
+        Button { isChoosing = true } label: {
+            HStack(spacing: 8) {
+                Text("字体颜色")
+                Circle()
+                    .fill(Color(uiColor: foreground))
+                    .overlay { Circle().strokeBorder(Color.secondary, lineWidth: 1) }
+                    .frame(width: 26, height: 26)
+            }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
         .disabled(isEInk)
         .accessibilityIdentifier("reader.textColor")
+        .accessibilityValue(ReaderTextColors.hexString(for: foreground) ?? "")
+        .sheet(isPresented: $isChoosing) {
+            ReaderTextColorSheet(foreground: foreground) { color in
+                colors.setForeground(color, for: theme)
+            }
+        }
+    }
+}
+
+private struct ReaderTextColorSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var hex: String
+    let select: (UIColor) -> Void
+
+    private static let swatches: [(name: String, rgb: UInt32)] = [
+        ("黑色", 0x000000), ("深灰", 0x343434), ("浅灰", 0xADADAD), ("白色", 0xFFFFFF),
+        ("棕色", 0x705038), ("红色", 0xB74040), ("紫色", 0x705393), ("蓝色", 0x285AA2),
+        ("青色", 0x216D76), ("绿色", 0x315C50), ("橄榄绿", 0x596C44), ("米色", 0xDECCA9)
+    ]
+
+    init(foreground: UIColor, select: @escaping (UIColor) -> Void) {
+        _hex = State(initialValue: ReaderTextColors.hexString(for: foreground) ?? "#000000")
+        self.select = select
+    }
+
+    private static func parseRGB(_ value: String) -> UInt32? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let digits = trimmed.hasPrefix("#") ? trimmed.dropFirst() : trimmed[...]
+        guard digits.count == 6, digits.allSatisfy(\.isHexDigit) else { return nil }
+        return UInt32(digits, radix: 16)
+    }
+
+    private func choose(_ value: String) {
+        hex = value
+        if let rgb = Self.parseRGB(value) { select(UIColor(hex: rgb)) }
+    }
+
+    var body: some View {
+        let rgb = Self.parseRGB(hex)
+        ReadingNavigationStack {
+            Form {
+                Section("常用颜色") {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 4), spacing: 8) {
+                        ForEach(Self.swatches, id: \.rgb) { swatch in
+                            let code = String(format: "%06X", swatch.rgb)
+                            let selected = rgb == swatch.rgb
+                            Button { choose("#" + code) } label: {
+                                Circle()
+                                    .fill(Color(uiColor: UIColor(hex: swatch.rgb)))
+                                    .overlay { Circle().strokeBorder(Color.secondary, lineWidth: 1) }
+                                    .overlay {
+                                        if selected {
+                                            Image(systemName: "checkmark.circle.fill")
+                                                .symbolRenderingMode(.palette)
+                                                .foregroundStyle(.white, .black)
+                                        }
+                                    }
+                                    .frame(width: 36, height: 36)
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(swatch.name)
+                            .accessibilityAddTraits(selected ? .isSelected : [])
+                            .accessibilityIdentifier("reader.textColor.swatch." + code)
+                        }
+                    }
+                }
+                Section("自定义颜色") {
+                    TextField("十六进制 RGB", text: Binding(get: { hex }, set: choose))
+                        .font(.body.monospaced())
+                        .keyboardType(.asciiCapable)
+                        .textInputAutocapitalization(.characters)
+                        .disableAutocorrection(true)
+                        .accessibilityIdentifier("reader.textColor.hex")
+                    if rgb == nil {
+                        Text("请输入 6 位十六进制颜色，例如 #315C50。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("字体颜色")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                        .disabled(rgb == nil)
+                        .accessibilityIdentifier("reader.textColor.done")
+                }
+            }
+        }
     }
 }
 

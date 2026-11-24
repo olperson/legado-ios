@@ -6,21 +6,42 @@ import Vision
 final class ReaderScrollGestureTests: XCTestCase {
     func testCenterTapOpensFontColorPickerBesideFontSize() throws {
         continueAfterFailure = false
-        for mode in ["0", "3"] {
+        for (mode, theme, hex, defaultHex) in [
+            ("0", "preset1", "315C50", "#000000"),
+            ("3", "preset2", "285AA2", "#3E3422")
+        ] {
             let app = XCUIApplication()
             app.launchArguments = ["-uiDemo", "-uiDemoReader", "-pageAnim", mode, "-themeMode", "1",
-                                   "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
-            app.launch()
+                                   "-readerTheme", theme]
             let reader = mode == "3" ? app.collectionViews["reader.continuous"] : app.textViews["reader.text"]
-            XCTAssertTrue(reader.waitForExistence(timeout: 20))
-            reader.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-            let picker = app.descendants(matching: .any).matching(identifier: "reader.textColor").firstMatch
-            XCTAssertTrue(picker.waitForExistence(timeout: 5))
-            XCTAssertTrue(app.buttons["减小字号"].isHittable && app.buttons["增大字号"].isHittable)
-            XCTAssertFalse(app.navigationBars["阅读样式"].exists)
-            picker.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
-            let spectrum = app.descendants(matching: .any).matching(NSPredicate(format: "label IN %@", ["Spectrum", "光谱"])).firstMatch
-            XCTAssertTrue(spectrum.waitForExistence(timeout: 5), "System color picker should open from the reading menu")
+            let picker = app.buttons["reader.textColor"]
+            func launchAndOpenMenu() {
+                app.launch()
+                XCTAssertTrue(reader.waitForExistence(timeout: 25))
+                reader.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+                XCTAssertTrue(picker.waitForExistence(timeout: 10))
+                XCTAssertTrue(app.buttons["减小字号"].isHittable && app.buttons["增大字号"].isHittable)
+                XCTAssertFalse(app.navigationBars["阅读样式"].exists)
+            }
+            launchAndOpenMenu()
+            picker.tap()
+            let swatch = app.buttons["reader.textColor.swatch." + hex]
+            XCTAssertTrue(swatch.waitForExistence(timeout: 10), app.debugDescription)
+            swatch.tap()
+            XCTAssertEqual(app.textFields["reader.textColor.hex"].value as? String, "#" + hex)
+            app.buttons["reader.textColor.done"].tap()
+            XCTAssertTrue(picker.waitForExistence(timeout: 10))
+            XCTAssertEqual(picker.value as? String, "#" + hex)
+            app.terminate()
+
+            launchAndOpenMenu()
+            XCTAssertEqual(picker.value as? String, "#" + hex)
+            app.buttons["外观"].tap()
+            let reset = app.buttons["reader.resetTextColor"]
+            XCTAssertTrue(reset.waitForExistence(timeout: 10) && reset.isEnabled)
+            reset.tap()
+            XCTAssertEqual(picker.value as? String, defaultHex)
+            XCTAssertFalse(reset.isEnabled)
             app.terminate()
         }
     }
