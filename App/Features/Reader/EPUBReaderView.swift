@@ -254,6 +254,8 @@ struct EPUBReaderView: View {
     @AppStorage("epubScroll") private var scroll = false
     @AppStorage("epubPublisherStyles") private var publisherStyles = true
     @AppStorage("epubTheme") private var theme = "system"
+    @AppStorage("themeMode") private var themeMode = "0"
+    @AppStorage(ReaderTextColors.storageKey) private var textColors = ReaderTextColors()
 
     init(book: Book, chapters: [BookChapter], initialIndex: Int, restoresSavedLocation: Bool,
          onReadText: @escaping (Int) -> Void) {
@@ -262,9 +264,39 @@ struct EPUBReaderView: View {
                                                          restoresSavedLocation: restoresSavedLocation))
     }
 
+    private var isEInk: Bool { themeMode == "3" }
+
+    private var effectiveTheme: ReadiumNavigator.Theme {
+        if isEInk { return .light }
+        switch theme {
+        case "system": return colorScheme == .dark ? .dark : .light
+        case "dark": return .dark
+        case "sepia": return .sepia
+        default: return .light
+        }
+    }
+
+    private var colorPreset: (id: String, name: String) {
+        if isEInk { return ("preset1", "E-Ink") }
+        switch effectiveTheme {
+        case .light: return ("preset1", "白色")
+        case .sepia: return ("preset2", "纸色")
+        case .dark: return ("night", "夜间")
+        }
+    }
+
     private var preferences: EPUBPreferences {
-        EPUBPreferences(fontSize: fontScale, publisherStyles: publisherStyles, scroll: scroll,
-                        theme: theme == "sepia" ? .sepia : (theme == "dark" || (theme == "system" && colorScheme == .dark) ? .dark : .light))
+        Self.readingPreferences(fontScale: fontScale, publisherStyles: publisherStyles, scroll: scroll,
+                                theme: effectiveTheme, foreground: textColors.customForeground(for: colorPreset.id),
+                                isEInk: isEInk)
+    }
+
+    static func readingPreferences(fontScale: Double, publisherStyles: Bool, scroll: Bool,
+                                   theme: ReadiumNavigator.Theme, foreground: UIColor?, isEInk: Bool) -> EPUBPreferences {
+        let customColor = foreground.flatMap(ReaderTextColors.hexString(for:)).flatMap(ReadiumNavigator.Color.init(hex:))
+        return EPUBPreferences(backgroundColor: isEInk ? .init(rawValue: 0xFFFFFF) : nil,
+                               fontSize: fontScale, publisherStyles: publisherStyles, scroll: scroll,
+                               textColor: isEInk ? .init(rawValue: 0) : customColor, theme: isEInk ? .light : theme)
     }
 
     var body: some View {
@@ -443,6 +475,15 @@ struct EPUBReaderView: View {
                         Text("白色").tag("light")
                         Text("纸色").tag("sepia")
                         Text("夜间").tag("dark")
+                    }
+                }
+                Section("文字颜色 · \(colorPreset.name)") {
+                    if model.navigator?.publication.metadata.layout == .fixed {
+                        Text("这本书使用固定版式，文字颜色由原书决定。")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ReaderTextColorControls(theme: colorPreset.id, isEInk: isEInk,
+                                                defaultForeground: effectiveTheme.contentColor.uiColor)
                     }
                 }
             }

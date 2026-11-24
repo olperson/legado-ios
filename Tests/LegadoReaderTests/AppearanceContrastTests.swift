@@ -54,6 +54,56 @@ final class ReaderFontStoreTests: XCTestCase {
 
 @MainActor
 final class AppearanceContrastTests: XCTestCase {
+    func testDefaultTextColorsMatchExistingReaderPresets() {
+        let colors = ReaderTextColors()
+        for preset in ReaderStylePreset.legadoDefaults {
+            let style = colors.style(for: preset.id)
+            XCTAssertNil(colors.customForeground(for: preset.id))
+            XCTAssertEqual(style.foreground, preset.foreground, preset.name)
+            XCTAssertEqual(style.background, preset.background, preset.name)
+        }
+        XCTAssertEqual(ReaderTextColors.hexString(for: colors.style(for: "dark").foreground), "#ADADAD")
+        XCTAssertEqual(ReaderTextColors.hexString(for: colors.style(for: "paper").foreground), "#3E3422")
+    }
+
+    func testTextColorsPersistAcrossSettingsInstancesAndResetOnlyCurrentTheme() throws {
+        let suite = "ReaderTextColorsTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let paperColor = UIColor(red: 36 / 255, green: 82 / 255, blue: 105 / 255, alpha: 1)
+        let nightColor = UIColor(red: 228 / 255, green: 203 / 255, blue: 166 / 255, alpha: 1)
+        let setting = AppStorage(wrappedValue: ReaderTextColors(), ReaderTextColors.storageKey, store: defaults)
+        var colors = setting.wrappedValue
+        colors.setForeground(paperColor, for: "paper")
+        colors.setForeground(nightColor, for: "night")
+        setting.wrappedValue = colors
+
+        let reopened = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let otherSetting = AppStorage(wrappedValue: ReaderTextColors(), ReaderTextColors.storageKey, store: reopened)
+        var loaded = otherSetting.wrappedValue
+        XCTAssertEqual(ReaderTextColors.hexString(for: loaded.style(for: "preset2").foreground), "#245269")
+        XCTAssertEqual(ReaderTextColors.hexString(for: loaded.style(for: "dark").foreground), "#E4CBA6")
+        XCTAssertEqual(loaded.style(for: "preset2").background, ReaderStylePreset.resolve("paper").background)
+        XCTAssertNil(loaded.customForeground(for: "wechat"))
+        loaded.resetForeground(for: "preset2")
+        otherSetting.wrappedValue = loaded
+
+        let saved = try XCTUnwrap(defaults.string(forKey: ReaderTextColors.storageKey))
+        let afterReset = try XCTUnwrap(ReaderTextColors(rawValue: saved))
+        XCTAssertNil(afterReset.customForeground(for: "paper"))
+        XCTAssertEqual(afterReset.style(for: "paper").foreground, ReaderStylePreset.resolve("paper").foreground)
+        XCTAssertEqual(ReaderTextColors.hexString(for: afterReset.style(for: "night").foreground), "#E4CBA6")
+    }
+
+    func testEInkKeepsBlackTextOnWhiteWithoutLosingThemeColor() {
+        var colors = ReaderTextColors()
+        colors.setForeground(.red, for: "night")
+        let eink = colors.style(for: "night", isEInk: true)
+        XCTAssertEqual(ReaderTextColors.hexString(for: eink.foreground), "#000000")
+        XCTAssertEqual(ReaderTextColors.hexString(for: eink.background), "#FFFFFF")
+        XCTAssertEqual(ReaderTextColors.hexString(for: colors.style(for: "dark").foreground), "#FF0000")
+    }
+
     func testLoginWebViewUsesAdaptiveBackgroundBeforeContentArrives() async throws {
         var source = BookSource(bookSourceUrl: "https://appearance.invalid", bookSourceName: "外观测试")
         source.loginUrl = "about:blank"

@@ -33,6 +33,14 @@ final class EPUBReaderIntegrationTests: XCTestCase {
         await model.go(to: ReadiumShared.Link(href: "Text/chapter.xhtml#body", mediaType: .xhtml))
         try await waitForJavaScript("document.querySelector('#illustration')?.complete && document.querySelector('#illustration').naturalWidth > 0 && getComputedStyle(document.querySelector('table')).borderTopStyle === 'solid' && document.querySelectorAll('td').length === 2", in: navigator)
         try await waitForLocation("Text/chapter.xhtml", in: model)
+        let paragraphColor = "getComputedStyle(document.querySelector('#body + p')).color"
+        try await waitForJavaScript("\(paragraphColor) === 'rgb(49, 65, 89)'", in: navigator)
+        model.apply(EPUBReaderView.readingPreferences(fontScale: 1, publisherStyles: true, scroll: false,
+                                                      theme: .light, foreground: .red, isEInk: false))
+        try await waitForJavaScript("\(paragraphColor) === 'rgb(255, 0, 0)'", in: navigator)
+        model.apply(EPUBReaderView.readingPreferences(fontScale: 1, publisherStyles: true, scroll: false,
+                                                      theme: .light, foreground: nil, isEInk: false))
+        try await waitForJavaScript("\(paragraphColor) === 'rgb(49, 65, 89)'", in: navigator)
         let note = try XCTUnwrap(model.tableOfContents.last?.link)
         await model.go(to: note)
         XCTAssertEqual(model.currentChapter?.startFragmentId, "note")
@@ -52,6 +60,17 @@ final class EPUBReaderIntegrationTests: XCTestCase {
         try await waitForLocation("Text/chapter.xhtml", in: restored)
         XCTAssertEqual(EPUBReaderModel.path(try XCTUnwrap(restored.location).href.string), "Text/chapter.xhtml")
         XCTAssertEqual(restored.currentChapter?.startFragmentId, "note")
+    }
+
+    func testEInkPreferencesUseBlackOnWhiteWithoutChangingPublisherStyles() {
+        let preferences = EPUBReaderView.readingPreferences(fontScale: 1.2, publisherStyles: true, scroll: true,
+                                                            theme: .dark, foreground: .red, isEInk: true)
+        XCTAssertEqual(preferences.theme, .light)
+        XCTAssertEqual(preferences.textColor?.rawValue, 0)
+        XCTAssertEqual(preferences.backgroundColor?.rawValue, 0xFFFFFF)
+        XCTAssertEqual(preferences.publisherStyles, true)
+        XCTAssertEqual(preferences.fontSize, 1.2)
+        XCTAssertEqual(preferences.scroll, true)
     }
 
     func testPagingBackFromNestedTOCAnchorUpdatesTextChapter() async throws {
@@ -132,7 +151,7 @@ final class EPUBReaderIntegrationTests: XCTestCase {
             ("cover.xhtml", Data(##"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>封面</title></head><body><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 140"><image xlink:href="Images/cover.png" width="100" height="140"/></svg></body></html>"##.utf8)),
             ("Text/chapter.xhtml", Data(##"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>图文正文</title><link rel="stylesheet" href="../Styles/book.css"/></head><body><h1 id="body">图文正文</h1><p>图片与表格保留在原位置。</p><img id="illustration" src="../Images/cover.png" alt="内嵌插图"/><table><tr><td>项目</td><td>数值</td></tr></table>\##(paragraphs)<p><a href="#note">脚注</a></p><aside id="note">脚注内容</aside></body></html>"##.utf8)),
             ("nav.xhtml", Data(##"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>目录</title></head><body><nav epub:type="toc"><ol><li><a href="cover.xhtml">封面</a></li><li><a href="Text/chapter.xhtml#body">图文正文</a><ol><li><a href="Text/chapter.xhtml#note">脚注</a></li></ol></li></ol></nav></body></html>"##.utf8)),
-            ("Styles/book.css", Data("table { border: 3px solid #123456; } img { max-width: 80%; }".utf8)),
+            ("Styles/book.css", Data("table { border: 3px solid #123456; } img { max-width: 80%; } #body + p { color: #314159; }".utf8)),
             ("Images/cover.png", png)
         ]
         let archive = try Archive(url: url, accessMode: .create)

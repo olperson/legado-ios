@@ -3,6 +3,21 @@ import XCTest
 
 @MainActor
 final class DarkModeUITests: XCTestCase {
+    func testGlobalReadingSettingsKeepTextColorLockedInEInkMode() {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "settings", "-themeMode", "3"])
+        let preferences = app.buttons["profile.textformat.size"]
+        scrollTo(preferences, in: app)
+        preferences.tap()
+        XCTAssertTrue(app.navigationBars["阅读设置"].waitForExistence(timeout: 5))
+        let picker = app.descendants(matching: .any).matching(identifier: "reader.textColor").firstMatch
+        let reset = app.buttons["reader.resetTextColor"]
+        for _ in 0..<12 where !picker.exists || !reset.exists { app.swipeUp() }
+        XCTAssertTrue(picker.exists && reset.exists)
+        XCTAssertFalse(picker.isEnabled)
+        XCTAssertFalse(reset.isEnabled)
+    }
+
     func testLegacyProfileScrollsBetweenHeaderAndSupport() {
         continueAfterFailure = false
         let app = launch(["-uiDemoTab", "settings", "-themeMode", "2", "-uiLegacyCompatibility"])

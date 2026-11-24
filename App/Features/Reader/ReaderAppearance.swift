@@ -43,6 +43,90 @@ struct ReaderStylePreset: Identifiable {
     }
 }
 
+struct ReaderTextColors: RawRepresentable, Equatable {
+    static let storageKey = "readerTextColors"
+    private var colors: [String: UInt32] = [:]
+
+    init() {}
+
+    init?(rawValue: String) {
+        guard let saved = try? JSONDecoder().decode([String: UInt32].self, from: Data(rawValue.utf8)),
+              saved.values.allSatisfy({ $0 <= 0xFFFFFF }) else { return nil }
+        colors = saved
+    }
+
+    var rawValue: String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return String(decoding: try! encoder.encode(colors), as: UTF8.self)
+    }
+
+    func customForeground(for theme: String) -> UIColor? {
+        colors[ReaderStylePreset.resolve(theme).id].map { UIColor(hex: $0) }
+    }
+
+    mutating func setForeground(_ color: UIColor, for theme: String) {
+        guard let rgb = Self.rgb(color) else { return }
+        colors[ReaderStylePreset.resolve(theme).id] = rgb
+    }
+
+    mutating func resetForeground(for theme: String) {
+        colors.removeValue(forKey: ReaderStylePreset.resolve(theme).id)
+    }
+
+    func style(for theme: String, isEInk: Bool = false) -> ReaderStylePreset {
+        if isEInk { return .eInk }
+        let preset = ReaderStylePreset.resolve(theme)
+        guard let rgb = colors[preset.id] else { return preset }
+        return ReaderStylePreset(id: preset.id, name: preset.name, background: preset.background, foreground: UIColor(hex: rgb))
+    }
+
+    static func hexString(for color: UIColor) -> String? {
+        rgb(color).map { String(format: "#%06X", $0) }
+    }
+
+    private static func rgb(_ color: UIColor) -> UInt32? {
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let components = color.cgColor.converted(to: space, intent: .relativeColorimetric, options: nil)?.components,
+              components.count >= 3 else { return nil }
+        func byte(_ value: CGFloat) -> UInt32 { UInt32((min(1, max(0, value)) * 255).rounded()) }
+        return (byte(components[0]) << 16) | (byte(components[1]) << 8) | byte(components[2])
+    }
+}
+
+struct ReaderTextColorControls: View {
+    let theme: String
+    let isEInk: Bool
+    let defaultForeground: UIColor?
+    @AppStorage(ReaderTextColors.storageKey) private var colors = ReaderTextColors()
+
+    init(theme: String, isEInk: Bool, defaultForeground: UIColor? = nil) {
+        self.theme = theme
+        self.isEInk = isEInk
+        self.defaultForeground = defaultForeground
+    }
+
+    var body: some View {
+        let custom = colors.customForeground(for: theme)
+        let foreground = isEInk ? ReaderStylePreset.eInk.foreground
+            : custom ?? defaultForeground ?? ReaderStylePreset.resolve(theme).foreground
+        ColorPicker("字体颜色", selection: Binding(
+            get: { Color(uiColor: foreground) },
+            set: { value in colors.setForeground(UIColor(value), for: theme) }
+        ), supportsOpacity: false)
+        .disabled(isEInk)
+        .accessibilityIdentifier("reader.textColor")
+        Button("恢复主题默认字体颜色") { colors.resetForeground(for: theme) }
+            .disabled(isEInk || custom == nil)
+            .accessibilityIdentifier("reader.resetTextColor")
+        if isEInk {
+            Text("E-Ink 模式使用黑色文字。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
 private extension UIColor {
     convenience init(hex: UInt32) {
         self.init(

@@ -97,6 +97,7 @@ struct ReaderView: View {
     @AppStorage("headerMode") private var headerMode = 0
     @AppStorage("footerMode") private var footerMode = 0
     @AppStorage("readerTheme") private var theme = "wechat"
+    @AppStorage(ReaderTextColors.storageKey) private var textColors = ReaderTextColors()
     @AppStorage("readerPreviousDayTheme") private var previousDayTheme = "wechat"
     @AppStorage("autoReadSpeed") private var autoReadSpeed = 10
     @AppStorage("ttsFollowSys") private var ttsFollowSystem = true
@@ -814,7 +815,7 @@ struct ReaderView: View {
     }
 
     private var resolvedStyle: ReaderStylePreset {
-        themeMode == "3" ? .eInk : ReaderStylePreset.resolve(theme)
+        textColors.style(for: theme, isEInk: themeMode == "3")
     }
 
     private var headerVisible: Bool {
@@ -1272,12 +1273,14 @@ struct ReaderView: View {
                         readerChoiceChip("宽松", selected: lineSpacing >= 18) { lineSpacing = 22 }
                     }
                     Toggle("两端对齐", isOn: $fullJustify)
+                    ReaderTextColorControls(theme: theme, isEInk: themeMode == "3")
                 }
 
                 Section("阅读背景") {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 12) {
-                            ForEach(ReaderStylePreset.legadoDefaults) { preset in
+                            ForEach(ReaderStylePreset.legadoDefaults) { original in
+                                let preset = textColors.style(for: original.id)
                                 let isSelected = resolvedStyle.id == preset.id && activeBackgroundImage == nil
                                 Button {
                                     useBackgroundImage = false

@@ -2188,6 +2188,8 @@ private struct SearchScopeSheet: View {
 }
 
 private struct ReadingPreferencesView: View {
+    @AppStorage("themeMode") private var themeMode = "0"
+    @AppStorage(ReaderTextColors.storageKey) private var textColors = ReaderTextColors()
     @AppStorage(EPUBReadingMode.preferenceKey) private var defaultEPUBMode = EPUBReadingMode.original
     @AppStorage("textSize") private var fontSize = 20.0
     @AppStorage("letterSpacing") private var letterSpacing = 0.1
@@ -2271,7 +2273,8 @@ private struct ReadingPreferencesView: View {
                 Toggle("阅读时不自动锁屏", isOn: $keepScreenOn)
                 Toggle("阅读时隐藏小横条", isOn: $hideHomeIndicator)
             }
-            Section("阅读背景") {
+            Section("阅读配色") {
+                ReaderTextColorControls(theme: theme, isEInk: themeMode == "3")
                 ForEach(ReaderStylePreset.legadoDefaults) { preset in
                     Button {
                         theme = preset.id
@@ -2297,12 +2300,16 @@ private struct ReadingPreferencesView: View {
                     .tracking(letterSpacing * fontSize)
                     .font(.system(size: fontSize, design: .serif))
                     .lineSpacing(lineSpacing)
-                    .foregroundStyle(Color(uiColor: ReaderStylePreset.resolve(theme).foreground))
+                    .foregroundStyle(Color(uiColor: previewStyle.foreground))
                     .padding(.vertical, 12)
-                    .listRowBackground(Color(uiColor: ReaderStylePreset.resolve(theme).background))
+                    .listRowBackground(Color(uiColor: previewStyle.background))
             }
         }
         .navigationTitle("阅读设置")
+    }
+
+    private var previewStyle: ReaderStylePreset {
+        textColors.style(for: theme, isEInk: themeMode == "3")
     }
 
     private func paddingSlider(_ title: String, value: Binding<Double>) -> some View {

@@ -208,6 +208,17 @@ final class ReaderScrollGestureTests: XCTestCase {
         }
     }
 
+    func testReadingStyleOffersTextColorInTheReader() {
+        continueAfterFailure = false
+        let app = launchAppearance()
+        let picker = app.descendants(matching: .any).matching(identifier: "reader.textColor").firstMatch
+        scrollToAppearanceElement(picker, in: app)
+        XCTAssertTrue(picker.isEnabled)
+        let reset = app.buttons["reader.resetTextColor"]
+        for _ in 0..<3 where !reset.exists { app.swipeUp() }
+        XCTAssertTrue(reset.exists)
+    }
+
     func testFontPickerInstallsSelectedTrueTypeFile() {
         continueAfterFailure = false
         let app = launchAppearance()
