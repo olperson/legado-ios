@@ -1,0 +1,66 @@
+name: Build and release IPA
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '正式版标签，与 Xcode 版本一致，例如 v0.1.17'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-ipa-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' || !github.event.deleted
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build unsigned iPhone IPA
+        shell: bash
+        run: |
+          if [[ -d /Applications/Xcode_26.1.1.app ]]; then
+            export DEVELOPER_DIR=/Applications/Xcode_26.1.1.app/Contents/Developer
+          fi
+          xcodebuild -version
+          bash scripts/build-unsigned-ipa.sh "$RUNNER_TEMP/dist" "$RELEASE_TAG"
+          cd "$RUNNER_TEMP/dist"
+          shasum -a 256 *.ipa > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-ipa
+          path: ${{ runner.temp }}/dist/
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: unsigned-ipa
+          path: ${{ runner.temp }}/dist
+      - name: Publish verified release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/publish-ipa-release.sh "$RUNNER_TEMP/dist" "$RELEASE_TAG"

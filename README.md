@@ -39,7 +39,7 @@
 
 ### IPA 与源码安装
 
-**IPA 下载见 [GitHub Releases](https://github.com/Aminark/legado-ios/releases)，需要自行签名安装。** 请下载附件中的 `.ipa` 文件；`Source code` 是源码压缩包。
+**[下载此 fork 的最新版 IPA](https://github.com/olperson/legado-ios/releases/latest)**。选择附件中的 `.ipa` 文件，使用自己的签名工具安装。上游项目的发行版见 [Aminark/legado-ios](https://github.com/Aminark/legado-ios/releases)。
 
 - **自行签名安装**：使用自己的签名工具安装 IPA。免费 Apple 账号自签的描述文件有效期通常为 7 天，到期需要重新签名安装，见 [Apple 说明](https://developer.apple.com/help/account/basics/about-your-developer-account#enable-a-personal-team-in-xcode)。
 - **巨魔安装**：已支持 [TrollStore](https://github.com/opa334/TrollStore) 的设备可自行尝试安装，具体系统兼容范围以 TrollStore 项目说明为准。

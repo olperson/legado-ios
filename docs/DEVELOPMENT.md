@@ -106,6 +106,15 @@ python3 scripts/export-open-source.py /tmp/legado-ios-open-source
 
 目标目录必须尚不存在。导出后检查内容，再用独立仓库管理；`.gitignore` 不会自动清理已经跟踪的文件。
 
+## 使用 GitHub Actions 发布 IPA
+
+发布前更新 Xcode 项目的 `MARKETING_VERSION` 和 `CURRENT_PROJECT_VERSION`，并在 `CHANGELOG.md` 顶部记录本次改动。将这些修改推送到要发布的提交。
+
+- **通过标签发布**。推送与应用版本一致的标签，例如 `git tag v0.1.17` 和 `git push origin v0.1.17`。
+- **手动发布**。在 GitHub 的 **Actions → Build and release IPA → Run workflow** 中选择分支并填写版本标签。构建成功后，工作流会为选定的提交创建标签。如果该标签已经指向另一个提交，发布会停止并保留原标签。
+
+工作流用 Xcode 编译 arm64 真机 Release 版本，核验版本、包标识和平台，再将未签名 IPA 与 `SHA256SUMS` 上传至 GitHub Release。中途失败可重新运行原任务。下载两个附件后，可在 macOS 用 `shasum -a 256 -c SHA256SUMS` 校验安装包。
+
 ## 维护应用源
 
 `docs/altstore.json` 是 AltStore Classic、SideStore 和 LiveContainer 共用的应用源，固定地址为：
