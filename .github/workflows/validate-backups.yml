@@ -1,0 +1,101 @@
+name: Backup tests
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'App/Features/Settings/*Backup*.swift'
+      - 'App/Features/Settings/*WebDAV*.swift'
+      - 'App/LegadoApp.swift'
+      - 'App/Info.plist'
+      - 'Sources/LegadoCore/Sync/**'
+      - 'Sources/LegadoCore/**/*Database*.swift'
+      - 'Tests/**/*Backup*.swift'
+      - 'Tests/**/*WebDAV*.swift'
+      - 'Tests/LegadoReaderUITests/ReaderScrollGestureTests.swift'
+      - 'Legado.xcodeproj/project.pbxproj'
+      - '.github/workflows/validate-backups.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.suite }}
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [core, iPhone]
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Select Xcode
+        shell: bash
+        run: |
+          if [[ -d /Applications/Xcode_26.1.1.app ]]; then
+            echo "DEVELOPER_DIR=/Applications/Xcode_26.1.1.app/Contents/Developer" >> "$GITHUB_ENV"
+          fi
+
+      - name: Test backup archives, schedules and WebDAV
+        if: matrix.suite == 'core'
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun swift test --force-resolved-versions --filter 'Backup|WebDAV' 2>&1 | tee "$RUNNER_TEMP/backup.log"
+          summary=$(grep -E 'Test run with [1-9][0-9]* tests? .*passed' "$RUNNER_TEMP/backup.log" | tail -1)
+          echo "::notice::$summary"
+
+      - name: Exercise the app backup service on an iPhone
+        if: matrix.suite == 'iPhone'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk=$(xcrun --sdk iphonesimulator --show-sdk-version)
+          device=$(xcrun simctl list devices available -j | jq -er --arg sdk "$sdk" '
+            [.devices | to_entries[] | select(.key | contains(".iOS-")) |
+             (.key | split(".iOS-")[1] | split("-") | map(tonumber)) as $runtime |
+             select($runtime[:2] <= ($sdk | split(".") | map(tonumber) | .[:2])) |
+             .value[] | select(.isAvailable and (.name | startswith("iPhone"))) |
+             {runtime: $runtime, name, udid}] | max_by(.runtime, .name).udid')
+          xcrun simctl bootstatus "$device" -b
+          run_tests() {
+            local scheme=$1 result="$RUNNER_TEMP/$1.xcresult" summary suite
+            shift
+            local selectors=()
+            for suite in "$@"; do selectors+=("-only-testing:$scheme/$suite"); done
+            xcodebuild -project Legado.xcodeproj -scheme "$scheme" -configuration Debug \
+              -destination "platform=iOS Simulator,id=$device" -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+              -onlyUsePackageVersionsFromResolvedFile -parallel-testing-enabled NO \
+              "${selectors[@]}" -resultBundlePath "$result" CODE_SIGN_IDENTITY=- test \
+              2>&1 | tee -a "$RUNNER_TEMP/backup.log"
+            summary=$(xcrun xcresulttool get test-results summary --path "$result")
+            jq -r --arg scheme "$scheme" '"::notice::\($scheme) — \(.passedTests) passed, \(.failedTests) failed, \(.skippedTests) skipped"' <<< "$summary"
+            jq -e '.passedTests > 0 and .failedTests == 0 and .skippedTests == 0' <<< "$summary" >/dev/null
+          }
+          run_tests LegadoReaderTests WebDAVBackupIntegrationTests BackupSessionStateTests
+          sh scripts/prepare-source-import-fixture.sh "$device"
+          run_tests LegadoReaderUITests ReaderScrollGestureTests/testLocalZIPBackupAndRestoreWithoutWebDAV
+
+      - name: Report diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/backup.log" ]]; then
+            awk '/error:|failed|recorded an issue|[Ee]xpectation failed/ && ++n <= 16 { gsub(/%/, "%25"); print "::error::" $0 }' "$RUNNER_TEMP/backup.log"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: backup-${{ matrix.suite }}-diagnostics
+          path: |
+            ${{ runner.temp }}/backup.log
+            ${{ runner.temp }}/LegadoReader*.xcresult
+          if-no-files-found: ignore
+          retention-days: 3

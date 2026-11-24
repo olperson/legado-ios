@@ -4,6 +4,86 @@ import Vision
 
 @MainActor
 final class ReaderScrollGestureTests: XCTestCase {
+    func testLocalZIPBackupAndRestoreWithoutWebDAV() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemoTab", "settings"]
+        app.launch()
+
+        func reveal(_ element: XCUIElement, towardBottom: Bool = true) {
+            for _ in 0..<6 where !element.isHittable {
+                if towardBottom { app.swipeUp() } else { app.swipeDown() }
+            }
+            XCTAssertTrue(element.isHittable, app.debugDescription)
+        }
+        func openSettings() {
+            let link = app.buttons["profile.arrow.triangle.2.circlepath"]
+            reveal(link)
+            link.tap()
+            XCTAssertTrue(app.navigationBars["备份与恢复"].waitForExistence(timeout: 10))
+            XCTAssertFalse(app.buttons["立即同步"].isEnabled)
+        }
+        func openFixtureFolder() {
+            let browse = app.tabBars.buttons.matching(NSPredicate(format: "label IN %@", ["Browse", "浏览"])).firstMatch
+            if browse.exists && !browse.isSelected { browse.tap() }
+            openImportFixtureFolder(in: app)
+        }
+
+        openSettings()
+        let open = app.switches["打开应用时备份"]
+        let interval = app.switches["按间隔备份"]
+        let daily = app.switches["每日定时备份"]
+        for toggle in [open, interval, daily] {
+            reveal(toggle)
+            if toggle.value as? String == "1" { toggle.tap() }
+        }
+
+        let export = app.buttons["导出 ZIP 备份到文件"]
+        reveal(export, towardBottom: false)
+        export.tap()
+        let save = app.buttons.matching(NSPredicate(format: "label IN %@", ["Save", "存储", "储存", "保存"])).firstMatch
+        XCTAssertTrue(save.waitForExistence(timeout: 30), app.debugDescription)
+        openFixtureFolder()
+        save.tap()
+        expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: save)
+        waitForExpectations(timeout: 15)
+
+        // A restored real preference distinguishes importing the selected ZIP from just dismissing Files.
+        for toggle in [open, interval, daily] {
+            reveal(toggle)
+            toggle.tap()
+            XCTAssertEqual(toggle.value as? String, "1")
+        }
+        XCTAssertEqual(interval.value as? String, "1")
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "本地时间")).firstMatch.exists)
+        // Avoid an app-opening backup while moving through Apple's file provider.
+        reveal(open, towardBottom: false)
+        open.tap()
+
+        let pick = app.buttons["选择 ZIP 文件恢复"]
+        reveal(pick, towardBottom: false)
+        pick.tap()
+        let files = app.collectionViews["File View"].cells
+        let archive = files.matching(NSPredicate(format: "label BEGINSWITH %@", "legado-")).firstMatch
+        if !archive.waitForExistence(timeout: 3) { openFixtureFolder() }
+        XCTAssertTrue(archive.waitForExistence(timeout: 10), app.debugDescription)
+        archive.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
+        let choose = app.buttons.matching(NSPredicate(format: "label IN %@", ["Open", "打开", "Import", "导入"])).firstMatch
+        if choose.exists { choose.tap() }
+        let confirm = app.alerts["恢复所选备份？"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 20), app.debugDescription)
+        confirm.buttons["恢复备份"].tap()
+        let restored = app.alerts["备份已恢复"]
+        XCTAssertTrue(restored.waitForExistence(timeout: 35), app.debugDescription)
+        restored.buttons["好"].tap()
+
+        openSettings()
+        for toggle in [interval, daily] {
+            reveal(toggle)
+            XCTAssertEqual(toggle.value as? String, "0", "恢复后应采用 ZIP 中的自动备份选项")
+        }
+    }
+
     func testCenterTapOpensFontColorPickerBesideFontSize() throws {
         continueAfterFailure = false
         for (mode, theme, hex, defaultHex) in [

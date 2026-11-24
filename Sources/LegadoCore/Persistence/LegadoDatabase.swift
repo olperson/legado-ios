@@ -136,6 +136,9 @@ public actor LegadoDatabase {
             try Self.execute(database, "PRAGMA foreign_keys = ON")
             try Self.execute(database, "PRAGMA journal_mode = WAL")
             try Self.migrate(database)
+            if url.standardizedFileURL == Self.defaultURL().standardizedFileURL {
+                try FullBackupArchive.recover(database: database, storage: .live(support: directory))
+            }
         } catch {
             sqlite3_close(database)
             throw error
@@ -147,6 +150,40 @@ public actor LegadoDatabase {
     public static func defaultURL() -> URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Legado/legado.sqlite3")
+    }
+
+    @discardableResult
+    public func createFullBackup(at url: URL, connection: Data?) throws -> String {
+        try createFullBackup(at: url, connection: connection, storage: .live(support: directory))
+    }
+
+    @discardableResult
+    public func restoreFullBackup(from url: URL) throws -> Data? {
+        try restoreFullBackup(from: url, storage: .live(support: directory))
+    }
+
+    public func pendingBackupSession() throws -> Data? { try FullBackupArchive.pendingSession(handle) }
+
+    public func acknowledgeBackupSession(_ payload: Data) throws {
+        try FullBackupArchive.acknowledgeSession(handle, payload: payload)
+    }
+
+    public static func fullBackupFingerprint(at url: URL) throws -> String {
+        try FullBackupArchive.metadata(at: url).fingerprint
+    }
+
+    public static func fullBackupConnection(at url: URL) throws -> Data? {
+        try FullBackupArchive.connection(at: url)
+    }
+
+    func createFullBackup(at url: URL, connection: Data?, storage: FullBackupStorage) throws -> String {
+        try FullBackupArchive.create(database: handle, storage: storage, at: url, connection: connection)
+    }
+
+    func restoreFullBackup(from url: URL, storage: FullBackupStorage) throws -> Data? {
+        let connection = try FullBackupArchive.restore(database: handle, storage: storage, from: url)
+        lastDirectory = nil
+        return connection
     }
 
     public func compact() throws {

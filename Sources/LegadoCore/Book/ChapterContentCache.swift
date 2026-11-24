@@ -126,6 +126,22 @@ public actor ChapterContentCache {
 
     public static func live() -> ChapterContentCache { shared }
 
+    /// Include offline chapters left in the caches folder by older app versions.
+    public func prepareForBackup() throws { try prepareStorage() }
+
+    public func resetAfterRestore() {
+        recent?.removeAllObjects()
+        versions.values.removeAllObjects()
+        storageReady = false
+        sizeUpperBound = nil
+        for (url, listeners) in observers {
+            let entry = (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode(CachedChapterContent.self, from: $0) }
+            for listener in listeners.values {
+                listener.continuation.yield(entry.map { $0.sourceID == nil || $0.sourceID == listener.sourceID } ?? false)
+            }
+        }
+    }
+
     private func prepareStorage() throws {
         guard !storageReady, let legacyDirectory else { return }
         let files = FileManager.default

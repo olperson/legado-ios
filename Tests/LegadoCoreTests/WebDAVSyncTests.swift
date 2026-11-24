@@ -95,6 +95,10 @@ private final class WebDAVFixtureProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 
     override func startLoading() {
+        if request.httpMethod == "MKCOL", request.url?.lastPathComponent == "no-directory" {
+            reply(405)
+            return
+        }
         guard let url = request.url, url.lastPathComponent == "legado-sync.json",
               request.value(forHTTPHeaderField: "Authorization") == "Basic cmVhZGVyOnRlc3Q=" else {
             reply(401)

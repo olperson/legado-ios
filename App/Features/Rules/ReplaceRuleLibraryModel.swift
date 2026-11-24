@@ -34,6 +34,8 @@ final class ReplaceRuleLibraryModel: ObservableObject {
         ReplaceRuleLibraryModel(repository: InMemoryReplaceRuleRepository())
     }
 
+    var canRestoreSnapshot: Bool { saveTask == nil }
+
     func load() async {
         do { rules = try await repository.load(); persistedRules = rules }
         catch { notice = .init(kind: .error, title: "净化规则读取失败", detail: error.localizedDescription) }

@@ -19,6 +19,8 @@ final class RuleSubscriptionModel: ObservableObject {
         self.repository = repository ?? (try? LegadoDatabase(url: LegadoDatabase.defaultURL())).map { SQLiteConfigurationRepository(database: $0) }
         self.transport = transport
     }
+    var canRestoreSnapshot: Bool { !isCheckingUpdates && saveTask == nil }
+
     func load() async {
         guard let repository else { errorMessage = "无法打开规则订阅数据库"; return }
         let generation = saveGeneration

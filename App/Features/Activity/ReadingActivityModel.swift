@@ -18,7 +18,7 @@ final class ReadingActivityModel: ObservableObject {
     private var bookmarkSaveGeneration = 0
     private var persistedBookmarks: [Bookmark] = []
     var isRestoringSnapshot = false
-    var canRestoreSnapshot: Bool { !isRestoringSnapshot && bookmarkSaveTask == nil }
+    var canRestoreSnapshot: Bool { !isRestoringSnapshot && bookmarkSaveTask == nil && recordSaveTask == nil }
     private var recordSaveTask: Task<Void, Never>?
     private var recordSaveGeneration = 0
     private var persistedRecords: [ReadRecord] = []

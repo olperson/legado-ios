@@ -1919,6 +1919,12 @@ public final class BookSourceRuntimeStore: @unchecked Sendable {
         return object.mapValues { String(describing: $0) }
     }
 
+    func invalidateAfterDatabaseRestore() {
+        lock.lock()
+        defer { lock.unlock() }
+        values.removeAll()
+    }
+
     private func persistentKey(sourceID: String, key: String) -> String {
         key == "loginHeader" ? "loginHeader_\(sourceID)" : "v_\(sourceID)_\(key)"
     }

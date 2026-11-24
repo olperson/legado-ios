@@ -225,7 +225,7 @@ struct FileManagementView: View {
             Text("已缓存 \(file.cachedChapters)/\(file.totalChapters) 章。导出文件会标记未缓存章节，可先返回详情缓存完整后再导出。")
         }
         .sheet(item: $model.readyExport, onDismiss: { model.finishExport() }) { file in
-            FileExportPicker(url: file.url) { model.readyExport = nil }
+            FileExportPicker(url: file.url) { _ in model.readyExport = nil }
         }
         .alert("文件操作失败", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("好") { model.errorMessage = nil }
@@ -323,9 +323,9 @@ struct FileManagementView: View {
     }
 }
 
-private struct FileExportPicker: UIViewControllerRepresentable {
+struct FileExportPicker: UIViewControllerRepresentable {
     let url: URL
-    let onCompletion: () -> Void
+    let onCompletion: (Bool) -> Void
     func makeCoordinator() -> Coordinator { Coordinator(onCompletion) }
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
@@ -334,9 +334,9 @@ private struct FileExportPicker: UIViewControllerRepresentable {
     }
     func updateUIViewController(_ controller: UIDocumentPickerViewController, context: Context) {}
     final class Coordinator: NSObject, UIDocumentPickerDelegate {
-        let completion: () -> Void
-        init(_ completion: @escaping () -> Void) { self.completion = completion }
-        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) { completion() }
-        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { completion() }
+        let completion: (Bool) -> Void
+        init(_ completion: @escaping (Bool) -> Void) { self.completion = completion }
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) { completion(!urls.isEmpty) }
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { completion(false) }
     }
 }

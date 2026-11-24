@@ -645,7 +645,7 @@ public struct SourceRateWindow: Sendable, Equatable {
 public actor SourceNetworkPolicy {
     public static let shared = SourceNetworkPolicy()
 
-    private struct StoredCookie: Sendable {
+    struct StoredCookie: Codable, Sendable {
         var name: String
         var value: String
         var domain: String
@@ -929,6 +929,18 @@ public actor SourceNetworkPolicy {
     }
 
     public func removeCookies(sourceID: String) { cookies[sourceID] = nil }
+
+    func cookiesForBackup() -> [String: [StoredCookie]] {
+        let now = Date()
+        return cookies.compactMapValues { jar in
+            let active = jar.filter { $0.expiresAt.map { $0 > now } ?? true }
+            return active.isEmpty ? nil : active
+        }
+    }
+
+    func restoreCookies(_ restored: [String: [StoredCookie]]) {
+        cookies = restored
+    }
 
     private func acquire(source: BookSource) async throws {
         guard let limit = SourceRateLimit(rawValue: source.concurrentRate) else { return }

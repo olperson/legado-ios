@@ -116,6 +116,7 @@ struct RootTabView: View {
                 .environmentObject(sourceLibrary)
                 .onAppear { sourceImportIsPresented = true }
         }
+        .onAppear { displayedSourceNotice = sourceLibrary.notice }
         .onChange(of: sourceLibrary.notice?.id) { _ in
             if !sourceImportIsPresented { displayedSourceNotice = sourceLibrary.notice }
         }
@@ -1603,7 +1604,7 @@ private struct SettingsView: View {
                 settingRow("GitHub 项目", icon: "chevron.left.forwardslash.chevron.right", isExternal: true)
             }
             .buttonStyle(.plain)
-            settingLink("WebDAV 同步", icon: "arrow.triangle.2.circlepath") { WebDAVSyncView() }
+            settingLink("备份与恢复", icon: "arrow.triangle.2.circlepath") { WebDAVSyncView() }
             settingLink("其他设置", icon: "gearshape") { OtherSettingsView() }
             settingLink("关于", icon: "info.circle", showsSeparator: false) { AboutView() }
         }

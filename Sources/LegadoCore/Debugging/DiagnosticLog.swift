@@ -37,6 +37,13 @@ public final class DiagnosticLog: @unchecked Sendable {
         try? persist()
     }
 
+    public func reloadAfterRestore() {
+        lock.withLock {
+            let restored = (try? JSONDecoder().decode([DiagnosticLogEntry].self, from: Data(contentsOf: fileURL))) ?? []
+            entries = Array(restored.suffix(maximumEntries))
+        }
+    }
+
     public func snapshot() -> [DiagnosticLogEntry] {
         lock.lock()
         defer { lock.unlock() }
