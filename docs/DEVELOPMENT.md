@@ -113,7 +113,7 @@ python3 scripts/export-open-source.py /tmp/legado-ios-open-source
 - **通过标签发布**。推送与应用版本一致的标签，例如 `git tag v0.1.17` 和 `git push origin v0.1.17`。
 - **手动发布**。在 GitHub 的 **Actions → Build and release IPA → Run workflow** 中选择分支并填写版本标签。构建成功后，工作流会为选定的提交创建标签。如果该标签已经指向另一个提交，发布会停止并保留原标签。
 
-工作流用 Xcode 编译 arm64 真机 Release 版本，核验版本、包标识和平台，再将未签名 IPA 与 `SHA256SUMS` 上传至 GitHub Release。中途失败可重新运行原任务。下载两个附件后，可在 macOS 用 `shasum -a 256 -c SHA256SUMS` 校验安装包。
+工作流用 Xcode 编译 arm64 真机 Release 版本，核验版本、包标识和平台，同时在 iPhone 模拟器验证阅读菜单选色。构建和界面测试均通过后，工作流会将未签名 IPA 与 `SHA256SUMS` 发布至 GitHub Release。中途失败可重新运行原任务。下载两个附件后，可在 macOS 用 `shasum -a 256 -c SHA256SUMS` 校验安装包。
 
 ## 维护应用源
 

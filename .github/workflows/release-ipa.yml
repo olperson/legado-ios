@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '正式版标签，与 Xcode 版本一致，例如 v0.1.17'
+        description: '正式版标签，与 Xcode 版本一致，例如 v0.1.18'
         required: true
         type: string
 
@@ -48,8 +48,32 @@ jobs:
           overwrite: true
           retention-days: 7
 
+  test-reader:
+    if: github.event_name == 'workflow_dispatch' || !github.event.deleted
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test the reader menu on an iPhone simulator
+        shell: bash
+        run: |
+          if [[ -d /Applications/Xcode_26.1.1.app ]]; then
+            export DEVELOPER_DIR=/Applications/Xcode_26.1.1.app/Contents/Developer
+          fi
+          bash scripts/test-reader-menu.sh "$RUNNER_TEMP/ReaderMenu.xcresult"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: reader-menu-test-result
+          path: ${{ runner.temp }}/ReaderMenu.xcresult
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 3
+
   publish:
-    needs: build
+    needs: [build, test-reader]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
