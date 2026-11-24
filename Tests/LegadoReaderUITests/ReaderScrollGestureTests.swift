@@ -422,7 +422,8 @@ final class ReaderScrollGestureTests: XCTestCase {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["-uiDemo", "-uiDemoTab", "settings", "-uiDemoFiles",
-                               "-pageAnim", "0", "-themeMode", "1", "-titleMode", "0", "-tipFooterRight", "4", "-textSize", "20"]
+                               "-pageAnim", "0", "-themeMode", "1", "-titleMode", "0", "-tipFooterRight", "4", "-textSize", "20",
+                               "-clickActionMiddleLeft", "2", "-clickActionMiddleRight", "1"]
         app.launch()
         app.navigationBars["文件管理"].buttons["更多"].tap()
         app.buttons["导入 TXT / EPUB"].firstMatch.tap()
@@ -442,37 +443,53 @@ final class ReaderScrollGestureTests: XCTestCase {
         XCTAssertTrue(body.waitForExistence(timeout: 20))
         let footer = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+/[0-9]+")).firstMatch
         XCTAssertTrue(footer.waitForExistence(timeout: 5))
-        let total = try XCTUnwrap(footer.label.split(separator: "/").last.flatMap { Int($0) })
-        XCTAssertGreaterThan(total, 1)
         let next = body.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
-        func waitForPage(_ number: Int) {
-            expectation(for: NSPredicate(format: "label BEGINSWITH %@", "\(number)/"), evaluatedWith: footer)
-            waitForExpectations(timeout: 5)
+        let previous = body.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
+        func waitForPage(_ number: Int, chapter: String) {
+            let title = chapter.filter { !$0.isWhitespace }
+            let ready = expectation(for: NSPredicate { _, _ in
+                guard footer.exists, let document = body.value as? String else { return false }
+                let pages = footer.label.split(separator: "/").compactMap { Int($0) }
+                return pages.count == 2 && pages[0] == number && pages[1] > 1
+                    && document.filter { !$0.isWhitespace }.contains(title)
+            }, evaluatedWith: nil)
+            wait(for: [ready], timeout: 10)
         }
-        func checkChapterHeading() throws {
-            waitForPage(1)
+        func checkVisibleText(_ text: String, region: CGRect) throws {
             let screenshot = try XCTUnwrap(body.screenshot().image.cgImage)
             let request = VNRecognizeTextRequest()
-            request.recognitionLanguages = ["zh-Hans"]
-            request.regionOfInterest = CGRect(x: 0, y: 0.75, width: 1, height: 0.25)
+            request.recognitionLanguages = ["zh-Hans", "en-US"]
+            request.regionOfInterest = region
             try VNImageRequestHandler(cgImage: screenshot).perform([request])
             let lines = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
-            XCTAssertTrue(lines.joined().filter { !$0.isWhitespace }.contains("第二章灯塔"), lines.description)
+            XCTAssertTrue(lines.joined().filter { !$0.isWhitespace }.contains(text), lines.description)
         }
-        for number in 2...total {
+        let first = "第一章 雨夜"
+        let second = "第二章 灯塔"
+        let headingRegion = CGRect(x: 0, y: 0.75, width: 1, height: 0.25)
+        waitForPage(1, chapter: first)
+        let firstTotal = try XCTUnwrap(footer.label.split(separator: "/").last.flatMap { Int($0) })
+        for number in 2...firstTotal {
             next.tap()
-            waitForPage(number)
+            waitForPage(number, chapter: first)
         }
         next.tap()
-        try checkChapterHeading()
-        body.swipeRight()
-        waitForPage(total)
+        waitForPage(1, chapter: second)
+        let secondTotal = try XCTUnwrap(footer.label.split(separator: "/").last.flatMap { Int($0) })
+        XCTAssertGreaterThan(secondTotal, firstTotal)
+        try checkVisibleText("第二章灯塔", region: headingRegion)
+        previous.tap()
+        waitForPage(firstTotal, chapter: first)
+        XCTAssertEqual(footer.label, "\(firstTotal)/\(firstTotal)")
+        try checkVisibleText("RAINEND", region: CGRect(x: 0, y: 0, width: 1, height: 1))
         next.tap()
-        try checkChapterHeading()
+        waitForPage(1, chapter: second)
+        try checkVisibleText("第二章灯塔", region: headingRegion)
         next.tap()
-        waitForPage(2)
+        waitForPage(2, chapter: second)
         body.swipeRight()
-        try checkChapterHeading()
+        waitForPage(1, chapter: second)
+        try checkVisibleText("第二章灯塔", region: headingRegion)
     }
 
     private func launchPagedReader(mode: String, fontSize: String,

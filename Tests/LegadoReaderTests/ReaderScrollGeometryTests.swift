@@ -88,8 +88,16 @@ final class ReaderPagingGeometryTests: XCTestCase {
     }
 
     func testCoverTurnKeepsNewChapterHeadingVisibleDuringReflow() async throws {
-        let text = String(repeating: "这是一段用来测试覆盖翻页的正文。\n", count: 100)
-        let first = pagedReader(text: text, title: "第一章 雨夜", animation: 0)
+        let firstText = String(repeating: "雨水冲过街道，在石阶上留下清晰的水痕。\n", count: 100) + "章节终点"
+        let secondText = String(repeating: "第二天的灯塔仍亮着。\n", count: 25)
+        var position = 0
+        var page = 1
+        func chapter(_ text: String, title: String, landing: Int) -> ReaderTextView {
+            pagedReader(text: text, title: title, animation: 0, requestedPosition: landing,
+                        readerPosition: Binding(get: { position }, set: { position = $0 }),
+                        currentPage: Binding(get: { page }, set: { page = $0 }))
+        }
+        let first = chapter(firstText, title: "第一章 雨夜", landing: 0)
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         let host = UIHostingController(rootView: first)
         window.rootViewController = host
@@ -105,25 +113,62 @@ final class ReaderPagingGeometryTests: XCTestCase {
         XCTAssertGreaterThan(last.offset, 0)
         view.setContentOffset(CGPoint(x: 0, y: last.offset), animated: false)
 
-        var next = pagedReader(text: text, title: "第二章 灯塔", animation: 0)
-        host.rootView = next
-        host.view.setNeedsLayout()
-        host.view.layoutIfNeeded()
+        func present(_ configuration: ReaderTextView) {
+            host.rootView = configuration
+            host.view.setNeedsLayout()
+            host.view.layoutIfNeeded()
+        }
+        func reapplyOutgoingOffset(_ offset: CGFloat) {
+            // UIKit may restore the old scroll offset after the new text has been laid out.
+            view.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
+            view.setNeedsLayout()
+            view.layoutIfNeeded()
+        }
+        var next = chapter(secondText, title: "第二章 灯塔", landing: 0)
+        next.chapterGeneration = 1
+        var loading = chapter("", title: next.title, landing: 0)
+        loading.holdsDisplayedPage = true
+        loading.chapterGeneration = 1
+        present(loading)
+        await Task.yield()
+        XCTAssertTrue(view.text.hasPrefix(first.title))
+        present(next)
         XCTAssertTrue(view.text.hasPrefix(next.title))
+        reapplyOutgoingOffset(last.offset)
+        XCTAssertEqual(view.contentOffset.y, 0, accuracy: 0.5)
         // A second layout can arrive in the same run loop as the chapter change.
         next.fontRevision += 1
-        host.rootView = next
-        host.view.setNeedsLayout()
-        host.view.layoutIfNeeded()
+        present(next)
         try await Task.sleep(nanoseconds: 50_000_000)
 
         XCTAssertEqual(view.contentOffset.y, 0, accuracy: 0.5)
+        XCTAssertEqual(page, 1)
+        XCTAssertEqual(position, 0)
         let glyphs = view.layoutManager.glyphRange(forCharacterRange: NSRange(location: 0, length: next.title.utf16.count),
                                                    actualCharacterRange: nil)
         let heading = view.layoutManager.boundingRect(forGlyphRange: glyphs, in: view.textContainer)
             .offsetBy(dx: view.textContainerInset.left, dy: view.textContainerInset.top)
         let mask = try XCTUnwrap((view.layer.mask as? CAShapeLayer)?.path?.boundingBoxOfPath)
         XCTAssertTrue(mask.intersection(view.bounds).contains(heading))
+
+        var previous = chapter(firstText, title: first.title, landing: Int.max)
+        previous.chapterGeneration = 2
+        loading = chapter("", title: first.title, landing: Int.max)
+        loading.holdsDisplayedPage = true
+        loading.chapterGeneration = 2
+        present(loading)
+        await Task.yield()
+        XCTAssertTrue(view.text.hasPrefix(next.title))
+        present(previous)
+        reapplyOutgoingOffset(0)
+        XCTAssertEqual(view.contentOffset.y, last.offset, accuracy: 0.5)
+        previous.fontRevision += 1
+        present(previous)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(view.text.hasPrefix(first.title))
+        XCTAssertEqual(view.contentOffset.y, last.offset, accuracy: 0.5)
+        XCTAssertEqual(page, pages.count)
+        XCTAssertEqual(position, last.characterRange.location - (first.title + "\n").utf16.count)
     }
 
     func testCoverDragTracksTheFingerAndSettlesInBothDirections() async throws {
@@ -293,6 +338,7 @@ final class ReaderPagingGeometryTests: XCTestCase {
     }
 
     private func pagedReader(text: String, title: String, animation: Int = 4,
+                             requestedPosition: Int = 0, readerPosition: Binding<Int> = .constant(0),
                              ranges: Binding<[NSRange]> = .constant([]),
                              currentPage: Binding<Int> = .constant(1),
                              totalPages: Binding<Int> = .constant(1)) -> ReaderTextView {
@@ -304,8 +350,8 @@ final class ReaderPagingGeometryTests: XCTestCase {
             headerInset: 0, footerInset: 0, fontWeight: 0, titleMode: 0, titleSize: 4,
             titleTopSpacing: 16, titleBottomSpacing: 24, underlineMode: 0, isSelectable: false,
             fullJustify: true, pageAnimation: animation, isEInkMode: false, clickActions: Array(repeating: 0, count: 9),
-            backgroundColor: .white, foregroundColor: .black, requestedPosition: 0, jumpPosition: nil,
-            renderRevision: 0, readerPosition: .constant(0), pageRanges: ranges,
+            backgroundColor: .white, foregroundColor: .black, requestedPosition: requestedPosition, jumpPosition: nil,
+            renderRevision: 0, readerPosition: readerPosition, pageRanges: ranges,
             currentPage: currentPage,
             totalPages: totalPages, isAutoReading: false,
             isAutoReadPaused: false, isLoadingNextChapter: false, secondsPerScreen: 10,

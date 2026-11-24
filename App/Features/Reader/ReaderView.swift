@@ -355,15 +355,16 @@ struct ReaderView: View {
             isWaitingForNextChapter = false
             isWaitingForPreviousChapter = false
             let needsInitialPosition = !model.hasLoadedCurrentChapter
+            let initialPosition = model.requestedPosition
             let pending = progressSaveTask
             let pendingGeneration = progressSaveGeneration
             guard !Task.isCancelled else { return }
             readerJumpPosition = nil
             readerPageRanges = []
-            if needsInitialPosition { readerPosition = model.requestedPosition }
+            if needsInitialPosition { readerPosition = initialPosition }
             await model.load(rules: model.usesReplaceRules ? replaceRules.rules : [])
             guard !Task.isCancelled else { return }
-            if needsInitialPosition {
+            if needsInitialPosition && readerPosition == initialPosition {
                 readerPosition = pageAnimation == 3
                     ? continuousPosition(model.requestedPosition, content: model.content)
                     : min(model.requestedPosition, max(model.content.utf16.count - 1, 0))
@@ -371,9 +372,11 @@ struct ReaderView: View {
             // Keep writes ordered without delaying the chapter request or its first render.
             await pending?.value
             guard !Task.isCancelled else { return }
-            if progressSaveGeneration == pendingGeneration { progressSaveTask = nil }
-            if let chapter = model.currentChapter {
-                await library.updateProgress(for: book, chapter: chapter, position: readerPosition)
+            if progressSaveGeneration == pendingGeneration {
+                progressSaveTask = nil
+                if let chapter = model.currentChapter {
+                    await library.updateProgress(for: book, chapter: chapter, position: readerPosition)
+                }
             }
             if resumesSpeechAfterChapterLoad, !model.content.isEmpty {
                 resumesSpeechAfterChapterLoad = false
@@ -382,6 +385,10 @@ struct ReaderView: View {
         }
         .task(id: "\(model.chapterLoadGeneration):\(model.currentIndex):\(model.hasLoadedCurrentChapter)") {
             model.checkForNewChapters(using: library) { readerPosition }
+        }
+        .task(id: "\(model.chapterLoadGeneration):\(pageAnimation == 0 && themeMode != "3"):\(model.hasLoadedCurrentChapter)") {
+            guard pageAnimation == 0, themeMode != "3" else { return }
+            await model.loadAdjacentChapters(rules: model.usesReplaceRules ? replaceRules.rules : [], localFilesOnly: true)
         }
         .task(id: "\(model.chapterLoadGeneration):\(pageAnimation == 3):\(model.hasLoadedCurrentChapter):\(model.scrollRevision):\(model.chapters.count)") {
             guard pageAnimation == 3 else { return }

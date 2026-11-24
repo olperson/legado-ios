@@ -189,17 +189,17 @@ final class ReaderCoverView: UIView {
 }
 
 private final class ReaderLayoutTextView: UITextView {
-    var onLayout: ((UITextView) -> Void)?
+    var onLayout: ((UITextView, Bool) -> Void)?
     private var reportedSize = CGSize.zero
     private var reportedContentSize = CGSize.zero
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        guard bounds.width > 0, bounds.height > 0,
-              bounds.size != reportedSize || contentSize != reportedContentSize else { return }
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let sizeChanged = bounds.size != reportedSize || contentSize != reportedContentSize
         reportedSize = bounds.size
         reportedContentSize = contentSize
-        onLayout?(self)
+        onLayout?(self, sizeChanged)
     }
 }
 
@@ -276,9 +276,10 @@ struct ReaderTextView: UIViewRepresentable {
         } else {
             view = ReaderLayoutTextView(frame: .zero)
         }
-        view.onLayout = { [weak coordinator = context.coordinator] view in
+        view.onLayout = { [weak coordinator = context.coordinator] view, sizeChanged in
             guard let coordinator, !coordinator.parent.holdsDisplayedPage, !coordinator.isApplyingContent else { return }
             coordinator.restorePendingPage(in: view)
+            guard sizeChanged else { return }
             coordinator.reportPage(in: view)
             coordinator.reportPageRanges(in: view)
         }
@@ -305,7 +306,7 @@ struct ReaderTextView: UIViewRepresentable {
 
     func updateUIView(_ view: UITextView, context: Context) {
         let wasHoldingPage = context.coordinator.parent.holdsDisplayedPage
-        let chapterChanged = context.coordinator.parent.chapterGeneration != chapterGeneration
+        let chapterChanged = context.coordinator.renderedChapterGeneration != chapterGeneration
         context.coordinator.parent = self
         if holdsDisplayedPage {
             if !wasHoldingPage { context.coordinator.holdDisplayedPage() }
@@ -314,7 +315,7 @@ struct ReaderTextView: UIViewRepresentable {
         let viewportSizeChanged = view.bounds.size != .zero
             && context.coordinator.lastViewportSize != view.bounds.size
         if viewportSizeChanged {
-            context.coordinator.cancelCover()
+            if !context.coordinator.awaitingCoverChapter { context.coordinator.cancelCover() }
             context.coordinator.lastViewportSize = view.bounds.size
         }
         let effectivePageAnimation = isEInkMode ? 4 : pageAnimation
@@ -329,8 +330,7 @@ struct ReaderTextView: UIViewRepresentable {
         if view.backgroundColor != backgroundColor { context.coordinator.cancelCover() }
         view.backgroundColor = backgroundColor
         view.isOpaque = backgroundColor != .clear
-        view.isSelectable = false
-        view.selectedRange = NSRange(location: 0, length: 0)
+        if view.selectedRange.length > 0 { view.selectedTextRange = nil }
         view.resignFirstResponder()
         view.textContainerInset = .init(
             top: CGFloat(paddingTop + headerInset),
@@ -354,10 +354,17 @@ struct ReaderTextView: UIViewRepresentable {
                 context.coordinator.needsDeferredRender = true
                 return
             }
-            context.coordinator.cancelCover()
+            if !context.coordinator.awaitingCoverChapter { context.coordinator.cancelCover() }
             let primaryContentChanged = chapterChanged || context.coordinator.primaryContentKey != primaryContentKey
-            let position = primaryContentChanged ? requestedPosition : context.coordinator.pendingPagePosition
-                ?? context.coordinator.contentCharacter(at: view.contentOffset, in: view)
+            let position: Int
+            if primaryContentChanged {
+                position = requestedPosition
+                let isReplacingPagedChapter = effectivePageAnimation != 3 && context.coordinator.renderedChapterGeneration != nil
+                context.coordinator.chapterEntryPosition = isReplacingPagedChapter ? position : nil
+            } else {
+                position = context.coordinator.chapterEntryPosition ?? context.coordinator.pendingPagePosition
+                    ?? context.coordinator.contentCharacter(at: view.contentOffset, in: view)
+            }
             context.coordinator.resetAutoReadForPageChange()
             context.coordinator.resetPageRangeRetry()
             context.coordinator.contentKey = contentKey
@@ -399,6 +406,7 @@ struct ReaderTextView: UIViewRepresentable {
                     attributes: bodyAttributes
                 ))
             }
+            context.coordinator.renderedChapterGeneration = chapterGeneration
             context.coordinator.isApplyingContent = true
             view.textStorage.setAttributedString(rendered)
             context.coordinator.isApplyingContent = false
@@ -410,7 +418,7 @@ struct ReaderTextView: UIViewRepresentable {
                 coordinator?.reportPageRanges(in: view)
             }
         } else if viewportSizeChanged {
-            context.coordinator.scroll(to: context.coordinator.pendingPagePosition ?? readerPosition, in: view)
+            context.coordinator.scroll(to: context.coordinator.chapterEntryPosition ?? context.coordinator.pendingPagePosition ?? readerPosition, in: view)
             let generation = context.coordinator.layoutGeneration
             DispatchQueue.main.async { [weak coordinator = context.coordinator] in
                 guard coordinator?.layoutGeneration == generation else { return }
@@ -420,6 +428,7 @@ struct ReaderTextView: UIViewRepresentable {
         }
         if let jumpPosition, context.coordinator.lastJumpPosition != jumpPosition {
             context.coordinator.lastJumpPosition = jumpPosition
+            context.coordinator.chapterEntryPosition = nil
             context.coordinator.scroll(to: jumpPosition, in: view)
         } else if jumpPosition == nil {
             context.coordinator.lastJumpPosition = nil
@@ -455,6 +464,10 @@ struct ReaderTextView: UIViewRepresentable {
         var continuationSectionStart: Int?
         var continuationBodyStart: Int?
         var lastJumpPosition: Int?
+        var renderedChapterGeneration: Int?
+        // UIKit may reapply the old scroll offset when TextKit finishes laying out a new
+        // document. Keep the requested entry until the reader intentionally moves on.
+        var chapterEntryPosition: Int?
         private(set) var pendingPagePosition: Int?
         private(set) var layoutGeneration = 0
         var lastViewportSize = CGSize.zero
@@ -486,7 +499,7 @@ struct ReaderTextView: UIViewRepresentable {
         private var pageRangeRetryCount = 0
         private weak var coverPan: UIPanGestureRecognizer?
         private var coverView: ReaderCoverView?
-        private var awaitingCoverChapter = false
+        private(set) var awaitingCoverChapter = false
         private weak var nextSwipe: UISwipeGestureRecognizer?
         private weak var previousSwipe: UISwipeGestureRecognizer?
         private weak var readerTap: UITapGestureRecognizer?
@@ -674,7 +687,7 @@ struct ReaderTextView: UIViewRepresentable {
         }
 
         func scroll(to characterPosition: Int, in view: UITextView) {
-            cancelCover()
+            if !awaitingCoverChapter { cancelCover() }
             guard !view.text.isEmpty else { return }
             layoutGeneration &+= 1
             if parent.pageAnimation != 3 {
@@ -710,13 +723,16 @@ struct ReaderTextView: UIViewRepresentable {
         }
 
         func restorePendingPage(in view: UITextView) {
-            guard let position = pendingPagePosition, !isApplyingContent,
+            guard let position = pendingPagePosition ?? chapterEntryPosition, !isApplyingContent, !isRenderingAutoPage,
+                  !parent.holdsDisplayedPage, renderedChapterGeneration == parent.chapterGeneration,
                   view.bounds.width > 0, view.bounds.height > 0 else { return }
             isApplyingContent = true
+            var reportPosition = false
             defer {
                 isApplyingContent = false
-                if pendingPagePosition == nil { scrollViewDidScroll(view) }
+                if reportPosition { scrollViewDidScroll(view) }
             }
+            if pendingPagePosition != nil { view.layoutIfNeeded() }
             let pages = pages(in: view)
             guard let first = pages.first, let last = pages.last else { return }
             let location = ReaderPositionResolver.renderedLocation(
@@ -725,7 +741,11 @@ struct ReaderTextView: UIViewRepresentable {
             // Chapter start includes the heading, even when it fills a page of its own.
             let page = position == 0 ? first : pages.first { NSLocationInRange(location, $0.characterRange) } ?? last
             lastViewportSize = view.bounds.size
-            view.setContentOffset(CGPoint(x: 0, y: page.offset), animated: false)
+            let needsMove = abs(view.contentOffset.y - page.offset) > 0.5
+            if needsMove { view.setContentOffset(CGPoint(x: 0, y: page.offset), animated: false) }
+            guard abs(view.contentOffset.y - page.offset) <= 0.5 else { return }
+            reportPosition = needsMove || pendingPagePosition != nil
+            if awaitingCoverChapter, pendingPagePosition != nil { cancelCover() }
             pendingPagePosition = nil
         }
 
@@ -855,7 +875,7 @@ struct ReaderTextView: UIViewRepresentable {
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            guard !parent.holdsDisplayedPage, !isRenderingAutoPage, !isApplyingContent, pendingPagePosition == nil else { return }
+            guard !parent.holdsDisplayedPage, !awaitingCoverChapter, !isRenderingAutoPage, !isApplyingContent, pendingPagePosition == nil else { return }
             guard let view = scrollView as? UITextView, !view.text.isEmpty else { return }
             if parent.isLoadingNextChapter, !didRequestLoadingCancellation {
                 let textBottom = max(
@@ -928,7 +948,8 @@ struct ReaderTextView: UIViewRepresentable {
             guard contentCharacter != parent.readerPosition else { return }
             let generation = layoutGeneration
             DispatchQueue.main.async { [weak self] in
-                guard let self, self.layoutGeneration == generation else { return }
+                guard let self, self.layoutGeneration == generation,
+                      self.contentCharacter(at: view.contentOffset, in: view) == contentCharacter else { return }
                 self.parent.readerPosition = contentCharacter
             }
         }
@@ -946,6 +967,7 @@ struct ReaderTextView: UIViewRepresentable {
             let generation = layoutGeneration
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.layoutGeneration == generation else { return }
+                guard self.pageMetrics(for: view) == metrics else { return }
                 self.parent.currentPage = metrics.current
                 self.parent.totalPages = metrics.total
             }
@@ -1189,6 +1211,7 @@ struct ReaderTextView: UIViewRepresentable {
                 } else {
                     self.cancelCover()
                     if commit, let target = overlay.targetOffset {
+                        self.chapterEntryPosition = nil
                         view.setContentOffset(CGPoint(x: 0, y: target), animated: false)
                     }
                 }
@@ -1223,6 +1246,8 @@ struct ReaderTextView: UIViewRepresentable {
         }
 
         private func crossChapterBoundary(_ direction: Int, in view: UITextView) {
+            layoutGeneration &+= 1
+            chapterEntryPosition = nil
             let position = contentCharacter(at: view.contentOffset, in: view)
             if direction > 0 { parent.onReachedEnd(position) } else { parent.onReachedStart(position) }
         }
@@ -1241,13 +1266,14 @@ struct ReaderTextView: UIViewRepresentable {
             let (minimum, maximum) = scrollLimits(for: view)
             let target = nextPageOffset(in: view, direction: direction)
             if direction < 0, view.contentOffset.y <= minimum + 0.5 {
-                parent.onReachedStart(contentCharacter(at: view.contentOffset, in: view))
+                crossChapterBoundary(direction, in: view)
                 return
             }
             if direction > 0, view.contentOffset.y >= maximum - 0.5 {
-                parent.onReachedEnd(contentCharacter(at: view.contentOffset, in: view))
+                crossChapterBoundary(direction, in: view)
                 return
             }
+            chapterEntryPosition = nil
             isTurningPage = true
             let completion: (Bool) -> Void = { [weak self] _ in self?.isTurningPage = false }
             switch parent.isEInkMode ? 4 : parent.pageAnimation {
@@ -1370,6 +1396,7 @@ struct ReaderTextView: UIViewRepresentable {
             }
             let elapsed = link.timestamp - lastTimestamp
             lastTimestamp = link.timestamp
+            chapterEntryPosition = nil
             if parent.isEInkMode {
                 advanceEInkAutoRead(in: view, elapsed: elapsed)
                 return

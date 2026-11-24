@@ -218,7 +218,7 @@ final class ReaderViewModel: ObservableObject {
         for _ in 0..<2 {
             let edge = direction > 0 ? scrollChapters.last?.id : scrollChapters.first?.id
             guard let edge, let index = readableIndex(from: edge, direction: direction) else { return }
-            let value = await loadAdjacentChapter(chapters[index], rules: rules)
+            let value = await loadAdjacentChapter(chapters[index], rules: rules, source: source)
             guard revision == scrollRevision, !Task.isCancelled else { return }
             // The viewport may have recycled this edge while the request was
             // in flight. Installing its result now would create a chapter gap.
@@ -239,7 +239,7 @@ final class ReaderViewModel: ObservableObject {
         let revision = scrollRevision
         scrollRetries.insert(index)
         defer { if revision == scrollRevision { scrollRetries.remove(index) } }
-        let value = await loadAdjacentChapter(chapters[index], rules: rules, forceRefresh: true)
+        let value = await loadAdjacentChapter(chapters[index], rules: rules, source: source, forceRefresh: true)
         guard revision == scrollRevision, !Task.isCancelled,
               let slot = scrollChapters.firstIndex(where: { $0.id == index }) else { return }
         scrollChapters[slot] = .init(id: index, title: value.title, content: value.content, error: value.error,
@@ -554,33 +554,36 @@ final class ReaderViewModel: ObservableObject {
         }
     }
 
-    func loadAdjacentChapters(rules: [ReplaceRule]) async {
+    func loadAdjacentChapters(rules: [ReplaceRule], localFilesOnly: Bool = false) async {
+        if localFilesOnly {
+            guard source == nil, URL(string: book.bookUrl)?.isFileURL == true,
+                  rules == readingRules, canReuseProcessedContent, hasLoadedCurrentChapter, !hasImageContent else { return }
+        }
         prepareAdjacentWindows()
         let requestedIndex = currentIndex
         let requestedGeneration = chapterLoadGeneration
         let previousIndex = previousLoadedIndex
         let nextIndex = continuationLoadedIndex
-        let needsPrevious = previousIndex != nil && !isPreviousWindowReady
-        let needsNext = nextIndex != nil && !isContinuationWindowReady
+        let previous = isPreviousWindowReady ? nil : previousIndex.map { chapters[$0] }
+        let next = isContinuationWindowReady ? nil : nextIndex.map { chapters[$0] }
+        let chapterSource = source
 
-        async let previousValue: (title: String, content: String, error: String?)? = needsPrevious
-            ? loadAdjacentChapter(chapters[previousIndex!], rules: rules)
-            : nil
-        async let nextValue: (title: String, content: String, error: String?)? = needsNext
-            ? loadAdjacentChapter(chapters[nextIndex!], rules: rules)
-            : nil
+        async let previousValue: (title: String, content: String, error: String?)? = previous != nil
+            ? loadAdjacentChapter(previous!, rules: rules, source: chapterSource) : nil
+        async let nextValue: (title: String, content: String, error: String?)? = next != nil
+            ? loadAdjacentChapter(next!, rules: rules, source: chapterSource) : nil
         let resolvedNext = await nextValue
         guard requestedGeneration == chapterLoadGeneration, requestedIndex == currentIndex, !Task.isCancelled else { return }
-        if continuationLoadedIndex == nextIndex, needsNext {
-            continuationTitle = resolvedNext?.title ?? nextIndex.map { chapters[$0].title } ?? ""
-            continuationContent = resolvedNext?.content ?? ""
+        if continuationLoadedIndex == nextIndex, let resolvedNext {
+            continuationTitle = resolvedNext.title
+            continuationContent = localFilesOnly && resolvedNext.error != nil ? "" : resolvedNext.content
             isContinuationWindowReady = true
         }
         let resolvedPrevious = await previousValue
         guard requestedGeneration == chapterLoadGeneration, requestedIndex == currentIndex, !Task.isCancelled else { return }
-        if previousLoadedIndex == previousIndex, needsPrevious {
-            previousTitle = resolvedPrevious?.title ?? previousIndex.map { chapters[$0].title } ?? ""
-            previousContent = resolvedPrevious?.content ?? ""
+        if previousLoadedIndex == previousIndex, let resolvedPrevious {
+            previousTitle = resolvedPrevious.title
+            previousContent = localFilesOnly && resolvedPrevious.error != nil ? "" : resolvedPrevious.content
             isPreviousWindowReady = true
         }
     }
@@ -588,6 +591,7 @@ final class ReaderViewModel: ObservableObject {
     private func loadAdjacentChapter(
         _ chapter: BookChapter,
         rules: [ReplaceRule],
+        source: BookSource?,
         forceRefresh: Bool = false
     ) async -> (title: String, content: String, error: String?) {
         if !forceRefresh, rules == readingRules, let prepared = preparedContent(for: chapter) {
@@ -711,6 +715,12 @@ final class ReaderViewModel: ObservableObject {
         let chapter = chapters[index]
         if let prepared = preparedContent(for: chapter) {
             return (prepared.body.title, prepared.body.content)
+        }
+        if source == nil, previousLoadedIndex == index, isPreviousWindowReady, !previousContent.isEmpty {
+            return (previousTitle, previousContent)
+        }
+        if source == nil, continuationLoadedIndex == index, isContinuationWindowReady, !continuationContent.isEmpty {
+            return (continuationTitle, continuationContent)
         }
         return (chapter.title, demoChapterContent ?? "")
     }

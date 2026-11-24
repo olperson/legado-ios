@@ -5,6 +5,8 @@ on:
     paths:
       - App/Features/Reader/ReaderTextView.swift
       - App/Features/Reader/ReaderView.swift
+      - App/Features/Reader/ReaderViewModel.swift
+      - scripts/fixtures/SourceImportFixture.swift
       - Tests/LegadoReaderTests/ReaderScrollGeometryTests.swift
       - Tests/LegadoReaderUITests/ReaderScrollGestureTests.swift
       - .github/workflows/validate-reader-cover.yml
