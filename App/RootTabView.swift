@@ -1603,6 +1603,7 @@ private struct SettingsView: View {
                 settingRow("GitHub 项目", icon: "chevron.left.forwardslash.chevron.right", isExternal: true)
             }
             .buttonStyle(.plain)
+            settingLink("WebDAV 同步", icon: "arrow.triangle.2.circlepath") { WebDAVSyncView() }
             settingLink("其他设置", icon: "gearshape") { OtherSettingsView() }
             settingLink("关于", icon: "info.circle", showsSeparator: false) { AboutView() }
         }

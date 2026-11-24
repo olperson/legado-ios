@@ -227,10 +227,10 @@ struct SourceManagementView: View {
         .sheet(isPresented: $showsQRImporter) {
             QRCodeImportView { value in Task { await library.previewInput(value) } }
         }
-        .sheet(isPresented: $showsTextImporter) {
-            SourceTextImportView()
-                .environmentObject(library)
-        }
+        .modifier(RuleImportSheet("导入书源", isPresented: $showsTextImporter,
+                                  chooseFiles: presentFileImporter, importText: library.previewInput) {
+            SourceImportFields(value: $0)
+        })
         .sheet(isPresented: $showsGroupManager) {
             SourceGroupManagerView().environmentObject(library)
         }
@@ -304,53 +304,31 @@ private struct SourceFileImportPicker: UIViewControllerRepresentable {
     }
 }
 
-private struct SourceTextImportView: View {
-    @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var library: SourceLibraryModel
+private struct SourceImportFields: View {
+    @Binding var value: String
     @State private var mode = 0
-    @State private var value = ""
 
     var body: some View {
-        ReadingNavigationStack {
-            Form {
-                Picker("导入方式", selection: $mode) {
-                    Text("URL").tag(0)
-                    Text("粘贴 JSON").tag(1)
-                }
-                .pickerStyle(.segmented)
+        Form {
+            Picker("导入方式", selection: $mode) {
+                Text("URL").tag(0)
+                Text("粘贴 JSON").tag(1)
+            }
+            .pickerStyle(.segmented)
 
-                Section(mode == 0 ? "书源 URL" : "书源 JSON") {
-                    if mode == 0 {
-                        TextField("https://example.com/sources.json", text: $value)
-                            .textInputAutocapitalization(.never)
-                            .keyboardType(.URL)
-                    } else {
-                        SyntaxCodeEditor(text: $value, language: .json)
-                            .frame(minHeight: 220)
-                    }
-                }
-                Section {
-                    Text("导入前可预览并选择书源。地址相同的书源将被替换。")
-                        .font(.footnote).foregroundStyle(.secondary)
+            Section(mode == 0 ? "书源 URL" : "书源 JSON") {
+                if mode == 0 {
+                    TextField("https://example.com/sources.json", text: $value)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                } else {
+                    SyntaxCodeEditor(text: $value, language: .json)
+                        .frame(minHeight: 220)
                 }
             }
-            .navigationTitle("导入书源")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("导入") {
-                        let input = value
-                        let selectedMode = mode
-                        dismiss()
-                        Task {
-                            try? await Task.sleep(nanoseconds: 350_000_000)
-                            if selectedMode == 0 { await library.previewRemoteURL(input) }
-                            else { await library.previewText(input) }
-                        }
-                    }
-                    .disabled(value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
+            Section {
+                Text("导入前可预览并选择书源。地址相同的书源将被替换。")
+                    .font(.footnote).foregroundStyle(.secondary)
             }
         }
     }

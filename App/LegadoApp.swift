@@ -14,18 +14,19 @@ struct LegadoApp: App {
         AppDiagnostics.shared.start()
         SourceWebViewExecutorRegistry.shared.register(WKSourceWebViewExecutor())
         let demo = ProcessInfo.processInfo.arguments.contains("-uiDemo")
+        let database = demo ? nil : try? LegadoDatabase(url: LegadoDatabase.defaultURL())
         _sourceLibrary = StateObject(wrappedValue: demo
             ? SourceLibraryModel.demo(sources: DemoContent.sources)
-            : SourceLibraryModel.live())
+            : SourceLibraryModel.live(database: database))
         _bookLibrary = StateObject(wrappedValue: demo
             ? BookLibraryModel.demo(books: DemoContent.books)
-            : BookLibraryModel.live())
+            : BookLibraryModel.live(database: database))
         _replaceRuleLibrary = StateObject(wrappedValue: demo
             ? ReplaceRuleLibraryModel.demo()
             : ReplaceRuleLibraryModel.live())
         _readingActivity = StateObject(wrappedValue: demo
             ? ReadingActivityModel.demo(bookmarks: DemoContent.bookmarks, records: DemoContent.readRecords)
-            : ReadingActivityModel.live())
+            : ReadingActivityModel.live(database: database))
         _rssLibrary = StateObject(wrappedValue: RSSLibraryModel.live())
         _ruleSubscriptions = StateObject(wrappedValue: RuleSubscriptionModel())
     }

@@ -17,6 +17,8 @@ final class ReadingActivityModel: ObservableObject {
     private var bookmarkSaveTask: Task<Void, Never>?
     private var bookmarkSaveGeneration = 0
     private var persistedBookmarks: [Bookmark] = []
+    var isRestoringSnapshot = false
+    var canRestoreSnapshot: Bool { !isRestoringSnapshot && bookmarkSaveTask == nil }
     private var recordSaveTask: Task<Void, Never>?
     private var recordSaveGeneration = 0
     private var persistedRecords: [ReadRecord] = []
@@ -26,7 +28,7 @@ final class ReadingActivityModel: ObservableObject {
         self.deviceID = deviceID
     }
 
-    static func live() -> ReadingActivityModel {
+    static func live(database: LegadoDatabase? = try? LegadoDatabase(url: LegadoDatabase.defaultURL())) -> ReadingActivityModel {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Legado", isDirectory: true)
         let key = "legado.reading.device-id"
@@ -36,7 +38,7 @@ final class ReadingActivityModel: ObservableObject {
         let bookmarksURL = base.appendingPathComponent("bookmarks.json")
         let recordsURL = base.appendingPathComponent("read-records.json")
         let repository: any ReadingActivityRepository
-        if let database = try? LegadoDatabase(url: base.appendingPathComponent("legado.sqlite3")) {
+        if let database {
             repository = SQLiteReadingActivityRepository(
                 database: database,
                 legacyBookmarksURL: bookmarksURL,
@@ -89,6 +91,12 @@ final class ReadingActivityModel: ObservableObject {
                 if $0.chapterIndex == $1.chapterIndex { return $0.chapterPosition < $1.chapterPosition }
                 return $0.chapterIndex < $1.chapterIndex
             }
+    }
+
+    func applyRestoredBookmarks(_ stored: [Bookmark]) {
+        bookmarkSaveGeneration &+= 1
+        bookmarks = service.sortedBookmarks(stored)
+        persistedBookmarks = bookmarks
     }
 
     func addBookmark(book: Book, chapter: BookChapter, position: Int, content: String, epubLocation: String? = nil) async {
@@ -171,6 +179,7 @@ final class ReadingActivityModel: ObservableObject {
     // Publish each change before suspension, and serialize full-snapshot writes
     // so rapid edits cannot overwrite one another or resurrect deleted history.
     private func persistBookmarks(_ updated: [Bookmark]) async {
+        guard !isRestoringSnapshot else { errorMessage = LibraryRestoreError.restoring.localizedDescription; return }
         bookmarks = service.sortedBookmarks(updated)
         bookmarkSaveGeneration &+= 1
         let generation = bookmarkSaveGeneration

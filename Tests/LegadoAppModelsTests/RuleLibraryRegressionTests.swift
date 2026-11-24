@@ -25,6 +25,57 @@ private actor ImportFixtureTransport: HTTPTransport {
 
 @MainActor
 struct RuleLibraryRegressionTests {
+    @Test func restoredShelfAndBookmarksArePublishedBeforeAnotherWrite() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try LegadoDatabase(url: directory.appendingPathComponent("reader.db"))
+        let sender = try LegadoDatabase(url: directory.appendingPathComponent("sender.db"))
+        let book = Book(bookUrl: "https://library.test/book", name: "远端小说", origin: "https://library.test")
+        let group = BookGroup(groupId: 1, groupName: "收藏")
+        let source = BookSource(bookSourceUrl: book.origin, bookSourceName: "远端书源")
+        let bookmark = Bookmark(time: 7, bookName: book.name)
+        try await sender.replaceBooks([book])
+        try await sender.replaceBookGroups([group])
+        try await sender.replaceBookSources([source])
+        try await sender.replaceBookmarks([bookmark])
+        let incoming = try await sender.exportWebDAVSnapshot()
+        let before = try await database.exportWebDAVSnapshot()
+        let books = BookLibraryModel(repository: SQLiteBookRepository(database: database),
+                                     groupRepository: SQLiteBookGroupRepository(database: database), syncDatabase: database)
+        let sources = SourceLibraryModel(repository: SQLiteBookSourceRepository(database: database))
+        let activity = ReadingActivityModel(repository: SQLiteReadingActivityRepository(database: database), deviceID: "reader")
+
+        try await books.restoreWebDAVSnapshot(incoming, expected: before, sources: sources, activity: activity)
+        #expect(books.books == [book] && books.groups == [group])
+        #expect(sources.sources == [source] && activity.bookmarks == [bookmark])
+        await activity.updateBookmark(Bookmark(time: 8, bookName: book.name))
+        #expect(try await database.loadBookmarks().map(\.id) == [7, 8])
+    }
+
+    @Test func silentSubscriptionWaitsForRestoredSourcesBeforeMerging() async throws {
+        let old = BookSource(bookSourceUrl: "https://old.test", bookSourceName: "旧书源")
+        let restored = BookSource(bookSourceUrl: "https://restored.test", bookSourceName: "恢复的书源")
+        let addition = BookSource(bookSourceUrl: "https://added.test", bookSourceName: "订阅的书源")
+        let model = SourceLibraryModel.demo(sources: [old])
+        await model.load()
+        let (signal, release) = AsyncStream<Void>.makeStream()
+        model.snapshotRestoreTask = Task {
+            for await _ in signal { break }
+            model.applyRestoredSources([restored])
+            model.snapshotRestoreTask = nil
+        }
+        var started = false
+        let update = Task {
+            started = true
+            try await model.applySilentSubscription(JSONEncoder().encode([addition]))
+        }
+        while !started { await Task.yield() }
+        release.yield(())
+        release.finish()
+        try await update.value
+        #expect(model.sources.map(\.id) == [restored.id, addition.id])
+    }
+
     @Test func overlappingSourceTogglesKeepBothChanges() async {
         let sources = ["a", "b"].map { BookSource(bookSourceUrl: "https://\($0).test", bookSourceName: $0) }
         let repository = SuspendedSourceRepository(sources: sources)

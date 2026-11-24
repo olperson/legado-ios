@@ -26,6 +26,18 @@ private struct BookDirectoryRestoreError: LocalizedError {
     }
 }
 
+enum LibraryRestoreError: LocalizedError {
+    case unavailable, busy, restoring
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable: "当前书架未连接到本机阅读数据库。"
+        case .busy: "书架、书源或书签正在更新，请稍后重试。"
+        case .restoring: "正在恢复阅读数据，请稍后重试。"
+        }
+    }
+}
+
 enum AppBookChapterRepository {
     static func live() -> any BookChapterRepository {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -65,6 +77,7 @@ final class BookLibraryModel: ObservableObject {
     @Published private(set) var isCheckingUpdates = false
 
     private let repository: any BookRepository
+    let syncDatabase: LegadoDatabase?
     private let localDirectory: URL
     let localFiles: LocalFileService
     private let localService = LocalBookService.live()
@@ -85,6 +98,11 @@ final class BookLibraryModel: ObservableObject {
     private var deletingGroupIDs: Set<Int64> = []
     private var sourceSwitchSaveTask: Task<Bool, Never>?
     private var loadGeneration = 0
+    private var snapshotRestoreTask: Task<Void, Error>?
+    var canRestoreSnapshot: Bool {
+        snapshotRestoreTask == nil && !isCheckingUpdates && bookSaveTask == nil &&
+            groupSaveTask == nil && sourceSwitchSaveTask == nil && deletingGroupIDs.isEmpty
+    }
 
     init(
         repository: any BookRepository,
@@ -94,9 +112,11 @@ final class BookLibraryModel: ObservableObject {
         groupRepository: any BookGroupRepository = InMemoryBookGroupRepository(),
         chapterCache: ChapterContentCache = .live(),
         progressDefaults: UserDefaults = .standard,
-        txtTocRuleRepository: SQLiteConfigurationRepository? = nil
+        txtTocRuleRepository: SQLiteConfigurationRepository? = nil,
+        syncDatabase: LegadoDatabase? = nil
     ) {
         self.repository = repository
+        self.syncDatabase = syncDatabase
         self.localDirectory = localDirectory ?? FileManager.default.temporaryDirectory.appendingPathComponent("LegadoLocalBooks")
         localFiles = LocalFileService(directory: self.localDirectory)
         self.updateCoordinator = updateCoordinator
@@ -109,11 +129,11 @@ final class BookLibraryModel: ObservableObject {
             .flatMap { try? JSONDecoder().decode([String: BookProgress].self, from: $0) }) ?? [:]
     }
 
-    static func live() -> BookLibraryModel {
+    static func live(database: LegadoDatabase? = try? LegadoDatabase(url: LegadoDatabase.defaultURL())) -> BookLibraryModel {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Legado", isDirectory: true)
         let legacyBooks = base.appendingPathComponent("books.json")
-        guard let database = try? LegadoDatabase(url: base.appendingPathComponent("legado.sqlite3")) else {
+        guard let database else {
             return BookLibraryModel(
                 repository: FileBookRepository(fileURL: legacyBooks),
                 localDirectory: base.appendingPathComponent("LocalBooks", isDirectory: true),
@@ -133,12 +153,41 @@ final class BookLibraryModel: ObservableObject {
                 database: database,
                 legacyFileURL: base.appendingPathComponent("book-groups.json")
             ),
-            txtTocRuleRepository: SQLiteConfigurationRepository(database: database)
+            txtTocRuleRepository: SQLiteConfigurationRepository(database: database),
+            syncDatabase: database
         )
     }
 
     static func demo(books: [Book]) -> BookLibraryModel {
         BookLibraryModel(repository: InMemoryBookRepository(books: books))
+    }
+
+    func restoreWebDAVSnapshot(_ data: Data, expected: Data,
+                               sources: SourceLibraryModel, activity: ReadingActivityModel) async throws {
+        guard let syncDatabase else { throw LibraryRestoreError.unavailable }
+        guard canRestoreSnapshot, sources.canRestoreSnapshot, activity.canRestoreSnapshot else { throw LibraryRestoreError.busy }
+
+        let restore = Task { @MainActor in
+            defer {
+                snapshotRestoreTask = nil
+                sources.snapshotRestoreTask = nil
+                activity.isRestoringSnapshot = false
+            }
+            let result = try await syncDatabase.restoreWebDAVSnapshot(data, expected: expected)
+            // Publish the committed values together before resuming waiting writers.
+            // An earlier load must not replace them when its repository read returns.
+            loadGeneration &+= 1
+            books = result.books
+            persistedBooks = result.books
+            groups = result.groups
+            persistedGroups = result.groups
+            sources.applyRestoredSources(result.sources)
+            activity.applyRestoredBookmarks(result.bookmarks)
+        }
+        snapshotRestoreTask = restore
+        sources.snapshotRestoreTask = restore
+        activity.isRestoringSnapshot = true
+        try await restore.value
     }
 
     func load() async {
@@ -315,7 +364,10 @@ final class BookLibraryModel: ObservableObject {
     }
 
     private func waitForSourceSwitch() async {
-        while let save = sourceSwitchSaveTask { _ = await save.value }
+        while sourceSwitchSaveTask != nil || snapshotRestoreTask != nil {
+            _ = await sourceSwitchSaveTask?.value
+            _ = try? await snapshotRestoreTask?.value
+        }
     }
 
     func updateProgress(for book: Book, chapter: BookChapter, position: Int = 0, epubLocation: String? = nil) async {
@@ -466,11 +518,9 @@ final class BookLibraryModel: ObservableObject {
     }
 
     func remove(at offsets: IndexSet) async {
+        let removed = Set(offsets.compactMap { books.indices.contains($0) ? books[$0].bookUrl : nil })
         await waitForSourceSwitch()
-        var updated = books
-        updated.remove(atOffsets: offsets)
-        let removed = Set(books.map(\.bookUrl)).subtracting(updated.map(\.bookUrl))
-        if await persist(updated) { await cleanupRemovedBooks(removed) }
+        if await persist(books.filter { !removed.contains($0.bookUrl) }) { await cleanupRemovedBooks(removed) }
     }
 
     var visibleGroups: [BookGroup] {
@@ -786,6 +836,7 @@ final class BookLibraryModel: ObservableObject {
 
     @discardableResult
     private func persist(_ updated: [Book], progressBook: Book? = nil, write: (@Sendable () async throws -> Void)? = nil) async -> Bool {
+        guard snapshotRestoreTask == nil else { errorMessage = LibraryRestoreError.restoring.localizedDescription; return false }
         // Publish before suspending so the next mutation sees the latest
         // shelf. Serialize disk writes to keep their order identical to it.
         books = updated
@@ -817,6 +868,7 @@ final class BookLibraryModel: ObservableObject {
 
     @discardableResult
     private func persistGroups(_ updated: [BookGroup]) async -> Bool {
+        guard snapshotRestoreTask == nil else { errorMessage = LibraryRestoreError.restoring.localizedDescription; return false }
         groups = updated
         groupSaveGeneration &+= 1
         let generation = groupSaveGeneration

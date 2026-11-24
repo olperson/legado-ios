@@ -1,6 +1,207 @@
 import Foundation
+import SQLite3
 import Testing
 @testable import LegadoCore
+
+struct WebDAVSnapshotTests {
+    @Test func restoresPortableShelfWithoutReplacingLocalBooksOrCachedDirectories() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let sender = try LegadoDatabase(url: dir.appendingPathComponent("sender/db"))
+        let receiver = try LegadoDatabase(url: dir.appendingPathComponent("receiver/db"))
+        let source = BookSource(bookSourceUrl: "https://source.example", bookSourceName: "书源")
+        let group = BookGroup(groupId: 1, groupName: "收藏")
+        let local = Book(bookUrl: "file:///reader/library/a.txt", name: "本机小说")
+        var book = Book(bookUrl: "https://source.example/book", name: "在线小说", origin: source.id)
+        let oldBook = book
+        book.group = group.id
+        book.durChapterPos = 123
+        let mark = Bookmark(time: 99, bookName: book.name)
+        let localMark = Bookmark(time: 77, bookName: local.name)
+        try await sender.replaceBooks([local, book])
+        try await sender.replaceBookSources([source])
+        try await sender.replaceBookGroups([group])
+        try await sender.replaceBookmarks([mark, localMark])
+        let data = try await sender.exportWebDAVSnapshot()
+        let summary = try LegadoDatabase.webDAVSnapshotSummary(data)
+        #expect(summary.bookCount == 1 && summary.bookmarkCount == 1 && summary.sourceCount == 1 && summary.groupCount == 1)
+        #expect(!String(decoding: data, as: UTF8.self).contains(local.name))
+        #expect(try LegadoDatabase.validateWebDAVSnapshot(data) == data)
+
+        var ownCopy = local
+        ownCopy.bookUrl = "file:///receiver/library/a.txt"
+        ownCopy.durChapterPos = 456
+        let localChapter = BookChapter(url: "local/1", title: "本地目录", bookUrl: ownCopy.id, index: 0)
+        let cachedChapter = BookChapter(url: "net/1", title: "已缓存目录", bookUrl: book.id, index: 0)
+        try await receiver.replaceBooks([ownCopy, oldBook])
+        try await receiver.replaceChapters([localChapter], bookURL: ownCopy.id)
+        try await receiver.replaceChapters([cachedChapter], bookURL: book.id)
+        try await receiver.replaceBookmarks([localMark])
+        let before = try await receiver.exportWebDAVSnapshot()
+        let restored = try await receiver.restoreWebDAVSnapshot(data, expected: before)
+        #expect(restored.books == [ownCopy, book] && restored.groups == [group] && restored.sources == [source])
+        #expect(restored.bookmarks == [localMark, mark])
+        #expect(try await receiver.loadBooks() == [ownCopy, book])
+        #expect(try await receiver.loadChapters(bookURL: book.id) == [cachedChapter])
+        #expect(try await receiver.loadChapters(bookURL: ownCopy.id) == [localChapter])
+        #expect(try await receiver.loadBookmarks() == [localMark, mark])
+        #expect(try await receiver.exportWebDAVSnapshot() == data)
+    }
+
+    @Test func rejectsChangesFromAnotherConnectionBeforeRestoring() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("db")
+        let reading = try LegadoDatabase(url: file)
+        let syncing = try LegadoDatabase(url: file)
+        let empty = try await syncing.exportWebDAVSnapshot()
+        var book = Book(bookUrl: "net", name: "书", origin: "源")
+        try await reading.replaceBooks([book])
+        let before = try await syncing.exportWebDAVSnapshot()
+        book.durChapterPos = 42
+        try await reading.replaceBooks([book])
+        await #expect(throws: LegadoDatabaseError.self) {
+            try await syncing.restoreWebDAVSnapshot(empty, expected: before)
+        }
+        #expect(try await syncing.loadBooks() == [book])
+    }
+
+    @Test func restoredEmptyShelfStaysEmptyWithLegacyJSONPresent() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let db = try LegadoDatabase(url: dir.appendingPathComponent("db"))
+        let remote = try LegadoDatabase(url: dir.appendingPathComponent("remote/db"))
+        try await remote.replaceBookGroups([.init(groupId: BookGroup.idAll, groupName: "全部")])
+        let empty = try await remote.exportWebDAVSnapshot()
+        #expect(try LegadoDatabase.webDAVSnapshotSummary(empty).isEmpty)
+        let file = dir.appendingPathComponent("books.json")
+        try JSONEncoder().encode([Book(bookUrl: "old", name: "旧书", origin: "旧源")]).write(to: file)
+        let imported = try await db.exportWebDAVSnapshot()
+        #expect(try LegadoDatabase.webDAVSnapshotSummary(imported).bookCount == 1)
+        try await db.restoreWebDAVSnapshot(empty, expected: imported)
+        #expect(try await SQLiteBookRepository(database: db, legacyFileURL: file).load().isEmpty)
+        let directories = dir.appendingPathComponent("Chapters")
+        try FileManager.default.createDirectory(at: directories, withIntermediateDirectories: true)
+        let chapter = BookChapter(url: "old/1", title: "已删除的书", bookUrl: "old", index: 0)
+        try JSONEncoder().encode([chapter]).write(to: directories.appendingPathComponent("old.json"))
+        let chapters = SQLiteBookChapterRepository(database: db, legacyDirectory: directories)
+        #expect(try await chapters.load(bookURL: "old").isEmpty)
+        #expect(try await db.exportWebDAVSnapshot() == empty)
+    }
+
+    @Test func firstExportMigratesLegacyFilesOnlyOnceEvenWithoutARestore() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let db = try LegadoDatabase(url: dir.appendingPathComponent("db"))
+        let encoder = JSONEncoder()
+        try encoder.encode([Book(bookUrl: "book", name: "书", origin: "源")]).write(to: dir.appendingPathComponent("books.json"))
+        try encoder.encode([BookSource(bookSourceUrl: "源", bookSourceName: "源")]).write(to: dir.appendingPathComponent("book-sources.json"))
+        try encoder.encode([BookGroup(groupId: 1, groupName: "组")]).write(to: dir.appendingPathComponent("book-groups.json"))
+        try encoder.encode([Bookmark(time: 1, bookName: "书")]).write(to: dir.appendingPathComponent("bookmarks.json"))
+        let imported = try await db.exportWebDAVSnapshot()
+        let summary = try LegadoDatabase.webDAVSnapshotSummary(imported)
+        #expect(summary.bookCount == 1 && summary.sourceCount == 1 && summary.groupCount == 1 && summary.bookmarkCount == 1)
+        try await db.replaceBooks([])
+        try await db.replaceBookGroups([])
+        try await db.replaceBookSources([])
+        try await db.replaceBookmarks([])
+        let reopened = try LegadoDatabase(url: dir.appendingPathComponent("db"))
+        let deleted = try await reopened.exportWebDAVSnapshot()
+        #expect(try LegadoDatabase.webDAVSnapshotSummary(deleted).isEmpty)
+    }
+
+    @Test func preservesLocalMembershipWhenCloudGroupBitsDiffer() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let sender = try LegadoDatabase(url: dir.appendingPathComponent("sender/db"))
+        let receiver = try LegadoDatabase(url: dir.appendingPathComponent("receiver/db"))
+        var book = Book(bookUrl: "file:///novel.txt", name: "本地书")
+        book.group = 1
+        let localGroup = BookGroup(groupId: 1, groupName: "家藏")
+        let unrelated = BookGroup(groupId: 1, groupName: "工作")
+        let newGroup = BookGroup(groupId: 2, groupName: "家藏")
+        try await receiver.replaceBooks([book])
+        try await receiver.replaceBookGroups([localGroup])
+        let before = try await receiver.exportWebDAVSnapshot()
+        for groups in [[unrelated], [newGroup, BookGroup(groupId: 4, groupName: "家藏")]] {
+            try await sender.replaceBookGroups(groups)
+            let incompatible = try await sender.exportWebDAVSnapshot()
+            await #expect(throws: LegadoDatabaseError.self) {
+                try await receiver.restoreWebDAVSnapshot(incompatible, expected: before)
+            }
+            #expect(try await receiver.loadBookGroups() == [localGroup])
+        }
+        try await sender.replaceBookGroups([unrelated, newGroup])
+        let compatible = try await sender.exportWebDAVSnapshot()
+        try await receiver.restoreWebDAVSnapshot(compatible, expected: before)
+        #expect(try await receiver.loadBooks().first?.group == newGroup.id)
+        #expect(try await receiver.exportWebDAVSnapshot() == compatible)
+    }
+
+    @Test func lateWriteFailureRollsBackAllSynchronizedTables() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("db")
+        let db = try LegadoDatabase(url: file)
+        let empty = try await db.exportWebDAVSnapshot()
+        try await db.replaceBooks([.init(bookUrl: "old", name: "旧书", origin: "源")])
+        try await db.replaceBookGroups([.init(groupId: 1, groupName: "收藏")])
+        try await db.replaceBookSources([.init(bookSourceUrl: "源", bookSourceName: "源")])
+        try await db.replaceBookmarks([.init(time: 1, bookName: "旧书")])
+        let before = try await db.exportWebDAVSnapshot()
+        var handle: OpaquePointer?
+        try #require(sqlite3_open(file.path, &handle) == SQLITE_OK)
+        defer { sqlite3_close(handle) }
+        let trigger = "CREATE TRIGGER deny_delete BEFORE DELETE ON bookmarks BEGIN SELECT RAISE(ABORT, 'test'); END;"
+        try #require(sqlite3_exec(handle, trigger, nil, nil, nil) == SQLITE_OK)
+        await #expect(throws: LegadoDatabaseError.self) {
+            try await db.restoreWebDAVSnapshot(empty, expected: before)
+        }
+        #expect(try await db.exportWebDAVSnapshot() == before)
+    }
+
+    @Test func retainsDirectoriesWhenOnlineBooksExchangeNames() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let db = try LegadoDatabase(url: dir.appendingPathComponent("receiver/db"))
+        let sender = try LegadoDatabase(url: dir.appendingPathComponent("sender/db"))
+        var one = Book(bookUrl: "1", name: "上", origin: "源")
+        var two = Book(bookUrl: "2", name: "下", origin: "源")
+        let chapter = BookChapter(url: "1/1", title: "缓存目录", bookUrl: one.id, index: 0)
+        try await db.replaceBooks([one, two])
+        try await db.replaceChapters([chapter], bookURL: one.id)
+        swap(&one.name, &two.name)
+        try await sender.replaceBooks([one, two])
+        let incoming = try await sender.exportWebDAVSnapshot()
+        let before = try await db.exportWebDAVSnapshot()
+        try await db.restoreWebDAVSnapshot(incoming, expected: before)
+        #expect(try await db.exportWebDAVSnapshot() == incoming)
+        #expect(try await db.loadChapters(bookURL: one.id) == [chapter])
+    }
+
+    @Test func rejectsMalformedSnapshotsAndConflictsWithDeviceOnlyBookmarks() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let db = try LegadoDatabase(url: dir.appendingPathComponent("db"))
+        let local = Book(bookUrl: "file:///local.epub", name: "本地书")
+        let mark = Bookmark(time: 7, bookName: local.name)
+        try await db.replaceBooks([local])
+        try await db.replaceBookmarks([mark])
+        let before = try await db.exportWebDAVSnapshot()
+        for json in [
+            #"{"version":2,"books":[],"sources":[],"groups":[],"bookmarks":[]}"#,
+            #"{"version":1,"books":[{"bookUrl":"file:///bad","origin":"net"}],"sources":[],"groups":[],"bookmarks":[]}"#,
+            #"{"version":1,"books":[],"sources":[],"groups":[],"bookmarks":[{"bookName":"缺少时间"}]}"#,
+            #"{"version":1,"books":[],"sources":[],"groups":[],"bookmarks":[{"time":7,"bookName":"云端书签"}]}"#
+        ] {
+            await #expect(throws: (any Error).self) {
+                try await db.restoreWebDAVSnapshot(Data(json.utf8), expected: before)
+            }
+        }
+        #expect(try await db.loadBooks() == [local])
+        #expect(try await db.loadBookmarks() == [mark])
+    }
+}
 
 struct LegadoDatabaseTests {
     @Test func openedDirectoryReflectsLocalAndExternalCommits() async throws {

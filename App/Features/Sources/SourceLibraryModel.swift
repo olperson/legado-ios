@@ -37,7 +37,10 @@ final class SourceImportFile: @unchecked Sendable {
 @MainActor
 final class SourceLibraryModel: ObservableObject {
     @Published private(set) var sources: [BookSource] = []
-    @Published private(set) var isWorking = false
+    @Published private var activeOperations = 0
+    var isWorking: Bool { activeOperations > 0 }
+    var snapshotRestoreTask: Task<Void, Error>?
+    var canRestoreSnapshot: Bool { snapshotRestoreTask == nil && !isWorking && saveTask == nil && pendingImport == nil }
     @Published var notice: Notice?
     @Published var pendingImport: PendingImport?
 
@@ -93,11 +96,11 @@ final class SourceLibraryModel: ObservableObject {
         self.importTransport = importTransport
     }
 
-    static func live() -> SourceLibraryModel {
+    static func live(database: LegadoDatabase? = try? LegadoDatabase(url: LegadoDatabase.defaultURL())) -> SourceLibraryModel {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Legado", isDirectory: true)
         let legacy = base.appendingPathComponent("book-sources.json")
-        guard let database = try? LegadoDatabase(url: base.appendingPathComponent("legado.sqlite3")) else {
+        guard let database else {
             return SourceLibraryModel(repository: FileBookSourceRepository(fileURL: legacy))
         }
         return SourceLibraryModel(repository: SQLiteBookSourceRepository(database: database, legacyFileURL: legacy))
@@ -109,19 +112,34 @@ final class SourceLibraryModel: ObservableObject {
 
     func load() async {
         guard sources.isEmpty else { return }
-        isWorking = true
-        defer { isWorking = false }
+        let generation = saveGeneration
+        _ = await saveTask?.value
+        activeOperations += 1
+        defer { activeOperations -= 1 }
         do {
-            sources = try await repository.load()
+            let stored = try await repository.load()
+            guard generation == saveGeneration else { return }
+            sources = stored
             persistedSources = sources
         } catch {
             notice = .init(kind: .error, title: "无法读取书源", detail: error.localizedDescription)
         }
     }
 
+    func applyRestoredSources(_ stored: [BookSource]) {
+        saveGeneration &+= 1
+        sources = stored
+        persistedSources = stored
+    }
+
+    private func waitForSnapshotRestore() async {
+        while let restore = snapshotRestoreTask { _ = try? await restore.value }
+    }
+
     func importFiles(_ urls: [URL]) async {
-        isWorking = true
-        defer { isWorking = false }
+        await waitForSnapshotRestore()
+        activeOperations += 1
+        defer { activeOperations -= 1 }
         var combined = sources
         var inserted = 0
         var replaced = 0
@@ -152,8 +170,9 @@ final class SourceLibraryModel: ObservableObject {
     func importText(_ text: String) async { await importRemoteURL(text) }
 
     func importRemoteURL(_ value: String) async {
-        isWorking = true
-        defer { isWorking = false }
+        await waitForSnapshotRestore()
+        activeOperations += 1
+        defer { activeOperations -= 1 }
         do {
             var budget = 100
             let batch = try await resolveImport(value, depth: 0, visited: [], budget: &budget)
@@ -185,6 +204,9 @@ final class SourceLibraryModel: ObservableObject {
     }
 
     func applySilentSubscription(_ data: Data) async throws {
+        await waitForSnapshotRestore()
+        activeOperations += 1
+        defer { activeOperations -= 1 }
         let incoming = try await Task.detached(priority: .userInitiated) { [importer] in
             try importer.decode(data)
         }.value
@@ -204,8 +226,9 @@ final class SourceLibraryModel: ObservableObject {
     }
 
     func previewPickedFiles(_ files: [SourceImportFile]) async {
-        isWorking = true
-        defer { isWorking = false }
+        await waitForSnapshotRestore()
+        activeOperations += 1
+        defer { activeOperations -= 1 }
         do {
             var incoming: [String: BookSource] = [:]
             var invalidItems: [PendingImport.InvalidItem] = []
@@ -231,8 +254,9 @@ final class SourceLibraryModel: ObservableObject {
     func previewRemoteURL(_ value: String) async { await previewInput(value) }
 
     func previewInput(_ value: String) async {
-        isWorking = true
-        defer { isWorking = false }
+        await waitForSnapshotRestore()
+        activeOperations += 1
+        defer { activeOperations -= 1 }
         do {
             var budget = 100
             let batch = try await resolveImport(value, depth: 0, visited: [], budget: &budget)
@@ -468,6 +492,7 @@ final class SourceLibraryModel: ObservableObject {
     }
 
     private func saveSources(_ updated: [BookSource]) async throws {
+        guard snapshotRestoreTask == nil else { throw LibraryRestoreError.restoring }
         sources = updated
         saveGeneration &+= 1
         let generation = saveGeneration

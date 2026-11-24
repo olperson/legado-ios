@@ -410,7 +410,10 @@ final class RuleEditorUITests: XCTestCase {
         }, evaluatedWith: nil)
         wait(for: [pickerClosed], timeout: 10)
         app.buttons["更多"].firstMatch.tap()
-        app.buttons["从文件导入"].tap()
+        app.buttons["URL 或粘贴 JSON"].tap()
+        let chooseFile = app.buttons["选择 JSON 文件"]
+        XCTAssertTrue(chooseFile.waitForExistence(timeout: 5))
+        chooseFile.tap()
         XCTAssertTrue(cancel.waitForExistence(timeout: 10))
 
         let json = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", "JSON-Source")).firstMatch

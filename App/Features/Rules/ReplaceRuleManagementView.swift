@@ -83,7 +83,13 @@ struct ReplaceRuleManagementView: View {
         }
         .sheet(item: $editingRule) { ReplaceRuleEditorView(rule: $0, startsWithTest: startsWithTest).environmentObject(library) }
         .sheet(isPresented: $showsQRImporter) { QRCodeImportView { value in Task { await library.importText(value) } } }
-        .sheet(isPresented: $showsTextImporter) { ReplaceRuleTextImportView().environmentObject(library) }
+        .modifier(RuleImportSheet("导入净化规则", isPresented: $showsTextImporter,
+                                  chooseFiles: { showsImporter = true }, importText: library.importText) { value in
+            VStack(alignment: .leading, spacing: 12) {
+                Text("粘贴净化规则 JSON、HTTP(S) 链接或 Legado 净化规则深链。").font(.footnote).foregroundStyle(.secondary)
+                SyntaxCodeEditor(text: value, language: .json)
+            }.padding()
+        })
         .fileImporter(isPresented: $showsImporter, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             switch result {
             case .success(let urls): Task { await library.importFiles(urls) }
@@ -98,33 +104,5 @@ struct ReplaceRuleManagementView: View {
     private var exportJSON: String {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return (try? encoder.encode(library.rules)).map { String(decoding: $0, as: UTF8.self) } ?? "[]"
-    }
-}
-
-private struct ReplaceRuleTextImportView: View {
-    @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var library: ReplaceRuleLibraryModel
-    @State private var value = ""
-    var body: some View {
-        ReadingNavigationStack {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("粘贴净化规则 JSON、HTTP(S) 链接或 Legado 净化规则深链。").font(.footnote).foregroundStyle(.secondary)
-                SyntaxCodeEditor(text: $value, language: .json)
-            }.padding()
-            .navigationTitle("导入净化规则").navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("导入") {
-                        let text = value
-                        dismiss()
-                        Task {
-                            try? await Task.sleep(nanoseconds: 400_000_000)
-                            await library.importText(text)
-                        }
-                    }.disabled(value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-        }
     }
 }

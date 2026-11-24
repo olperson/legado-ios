@@ -78,6 +78,8 @@
 	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>用于扫描书源和净化规则的导入二维码。</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>用于连接你填写的局域网 WebDAV 服务器，同步书架、阅读进度、书源和书签。</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>用于保存阅读页面中的图片到照片图库。</string>
 	<key>UIApplicationSceneManifest</key>

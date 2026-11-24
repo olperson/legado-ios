@@ -46,7 +46,10 @@ struct RSSHomeView: View {
             if case .failure(let error) = result { library.errorMessage = error.localizedDescription }
         })
         let sheets = AnyView(importing
-            .sheet(isPresented: $showsTextImport) { RSSImportSheet() }
+            .modifier(RuleImportSheet("导入RSS源", isPresented: $showsTextImport, dismissAfterImport: true,
+                                      chooseFiles: { showsFiles = true }, importText: library.importText) { text in
+                TextEditor(text: text).font(.system(.body, design: .monospaced)).padding()
+            })
             .sheet(item: $editingStar) { value in
                 RSSStarEditSheet(star: value, save: { updated in
                     Task { await library.saveStar(updated) }
@@ -588,22 +591,6 @@ private final class RSSSpeechController: NSObject, ObservableObject, AVSpeechSyn
     func stop() { synthesizer.stopSpeaking(at: .immediate); isSpeaking = false }
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) { Task { @MainActor in self.isSpeaking = false } }
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) { Task { @MainActor in self.isSpeaking = false } }
-}
-
-private struct RSSImportSheet: View {
-    @EnvironmentObject private var library: RSSLibraryModel
-    @Environment(\.dismiss) private var dismiss
-    @State private var text = ""
-    var body: some View {
-        ReadingNavigationStack {
-            TextEditor(text: $text).font(.system(.body, design: .monospaced)).padding()
-                .navigationTitle("导入RSS源")
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
-                    ToolbarItem(placement: .confirmationAction) { Button("导入") { Task { await library.importText(text); dismiss() } }.disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
-                }
-        }
-    }
 }
 
 private struct RSSExportDocument: FileDocument {

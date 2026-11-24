@@ -16,6 +16,95 @@ public enum LegadoDatabaseError: Error, LocalizedError, Sendable {
     }
 }
 
+public struct WebDAVSnapshotSummary: Sendable {
+    public let bookCount: Int
+    public let groupCount: Int
+    public let sourceCount: Int
+    public let bookmarkCount: Int
+    public var isEmpty: Bool { bookCount == 0 && groupCount == 0 && sourceCount == 0 && bookmarkCount == 0 }
+}
+
+private struct WebDAVBookIdentity: Hashable {
+    let name: String
+    let author: String
+
+    init(_ book: Book) { name = book.name; author = book.author }
+    init(_ mark: Bookmark) { name = mark.bookName; author = mark.bookAuthor }
+}
+
+private struct WebDAVSnapshot: Codable {
+    static let defaultGroup = BookGroup(groupId: BookGroup.idAll, groupName: "全部")
+    let version: Int
+    var books: [Book]
+    var groups: [BookGroup]
+    var sources: [BookSource]
+    var bookmarks: [Bookmark]
+
+    var summary: WebDAVSnapshotSummary {
+        .init(bookCount: books.count, groupCount: groups.count, sourceCount: sources.count, bookmarkCount: bookmarks.count)
+    }
+
+    static func isDeviceBook(_ book: Book) -> Bool {
+        book.origin == "local" || URL(string: book.bookUrl)?.isFileURL == true
+    }
+
+    static func isDeviceBookmark(_ mark: Bookmark, localBooks: Set<WebDAVBookIdentity>) -> Bool {
+        mark.epubLocation != nil || localBooks.contains(WebDAVBookIdentity(mark))
+    }
+
+    static func decode(_ data: Data) throws -> Self {
+        var snapshot: Self
+        do {
+            snapshot = try JSONDecoder().decode(Self.self, from: data)
+        } catch is DecodingError {
+            throw LegadoDatabaseError.decode("无法读取同步 JSON。请选择小浣熊阅读生成的 legado-sync.json。")
+        }
+        guard snapshot.books.allSatisfy({ !$0.bookUrl.isEmpty && !isDeviceBook($0) }),
+              snapshot.sources.allSatisfy({ !$0.bookSourceUrl.isEmpty }),
+              snapshot.bookmarks.allSatisfy({ $0.epubLocation == nil }),
+              Set(snapshot.books.map(\.id)).count == snapshot.books.count,
+              Set(snapshot.books.map(WebDAVBookIdentity.init)).count == snapshot.books.count,
+              Set(snapshot.sources.map(\.id)).count == snapshot.sources.count,
+              Set(snapshot.groups.map(\.id)).count == snapshot.groups.count,
+              Set(snapshot.bookmarks.map(\.id)).count == snapshot.bookmarks.count else {
+            throw LegadoDatabaseError.decode("同步文件包含重复记录、本机文件或缺少标识的记录。")
+        }
+        snapshot.normalize()
+        return snapshot
+    }
+
+    mutating func normalize() {
+        if groups == [Self.defaultGroup] { groups = [] }
+        bookmarks.sort { $0.time < $1.time }
+    }
+
+    func encoded() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(self)
+    }
+}
+
+private extension WebDAVSnapshot {
+    init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        version = try fields.decode(Int.self, forKey: .version)
+        guard version == 1 else { throw LegadoDatabaseError.decode("不支持的 WebDAV 同步文件版本（\(version)）。") }
+        books = try fields.decode([Book].self, forKey: .books)
+        groups = try fields.decode([BookGroup].self, forKey: .groups)
+        sources = try fields.decode([BookSource].self, forKey: .sources)
+        var rows = try fields.nestedUnkeyedContainer(forKey: .bookmarks)
+        bookmarks = []
+        while !rows.isAtEnd {
+            let row = try rows.superDecoder()
+            // Legacy imports generate a timestamp for missing IDs. A sync file requires a stable ID.
+            enum BookmarkKey: String, CodingKey { case time }
+            _ = try row.container(keyedBy: BookmarkKey.self).decode(Int64.self, forKey: .time)
+            bookmarks.append(try Bookmark(from: row))
+        }
+    }
+}
+
 public actor LegadoDatabase {
     public static let schemaVersion: Int32 = 7
 
@@ -23,11 +112,13 @@ public actor LegadoDatabase {
     // actor-isolated. `nonisolated(unsafe)` only permits closing the handle
     // from Swift 6's nonisolated actor deinitializer.
     nonisolated(unsafe) private let handle: OpaquePointer
+    private let directory: URL
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var lastDirectory: (bookURL: String, version: Int32, chapters: [BookChapter])?
 
     public init(url: URL) throws {
+        directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -61,6 +152,115 @@ public actor LegadoDatabase {
     public func compact() throws {
         try Self.execute(handle, "PRAGMA wal_checkpoint(TRUNCATE)")
         try Self.execute(handle, "VACUUM")
+    }
+
+    public static func inspectWebDAVSnapshot(_ data: Data) throws -> (data: Data, summary: WebDAVSnapshotSummary) {
+        let snapshot = try WebDAVSnapshot.decode(data)
+        return (try snapshot.encoded(), snapshot.summary)
+    }
+
+    public static func validateWebDAVSnapshot(_ data: Data) throws -> Data {
+        try inspectWebDAVSnapshot(data).data
+    }
+
+    public static func webDAVSnapshotSummary(_ data: Data) throws -> WebDAVSnapshotSummary {
+        try WebDAVSnapshot.decode(data).summary
+    }
+
+    public func exportWebDAVSnapshot() throws -> Data {
+        let snapshot = try transaction {
+            try importLegacyJSON(
+                bookSourcesURL: directory.appendingPathComponent("book-sources.json"),
+                booksURL: directory.appendingPathComponent("books.json"),
+                bookGroupsURL: directory.appendingPathComponent("book-groups.json"),
+                bookmarksURL: directory.appendingPathComponent("bookmarks.json")
+            )
+            let snapshot = try webDAVSnapshot(books: loadBooks(), bookmarks: loadBookmarks())
+            try markLegacyShelfImported()
+            return snapshot
+        }
+        return try snapshot.encoded()
+    }
+
+    @discardableResult
+    public func restoreWebDAVSnapshot(_ data: Data, expected: Data) throws
+        -> (books: [Book], groups: [BookGroup], sources: [BookSource], bookmarks: [Bookmark]) {
+        let incoming = try WebDAVSnapshot.decode(data)
+        return try transaction {
+            let books = try loadBooks()
+            let bookmarks = try loadBookmarks()
+            let current = try webDAVSnapshot(books: books, bookmarks: bookmarks)
+            guard try current.encoded() == expected else {
+                throw LegadoDatabaseError.execute("同步期间本机数据已更新，请重新同步。")
+            }
+            let deviceBooks = books.filter(WebDAVSnapshot.isDeviceBook)
+            let deviceNames = Set(deviceBooks.map(WebDAVBookIdentity.init))
+            let deviceMarks = bookmarks.filter { WebDAVSnapshot.isDeviceBookmark($0, localBooks: deviceNames) }
+            let deviceURLs = Set(deviceBooks.map(\.id))
+            let deviceMarkIDs = Set(deviceMarks.map(\.id))
+            guard incoming.books.allSatisfy({ !deviceURLs.contains($0.id) && !deviceNames.contains(WebDAVBookIdentity($0)) }),
+                  incoming.bookmarks.allSatisfy({ !deviceMarkIDs.contains($0.id) && !deviceNames.contains(WebDAVBookIdentity($0)) }) else {
+                throw LegadoDatabaseError.execute("云端记录与本机文件或书签重名或标识冲突，无法恢复。")
+            }
+
+            // Keep local files in their existing shelf slots and use the remote ordering for online books.
+            let groupMap = try Self.deviceGroupMap(
+                mask: deviceBooks.reduce(0) { $0 | $1.group }, from: current.groups, to: incoming.groups
+            )
+            var onlineBooks = incoming.books.makeIterator()
+            var shelf = books.compactMap { book -> Book? in
+                guard WebDAVSnapshot.isDeviceBook(book) else { return onlineBooks.next() }
+                var local = book
+                local.group = groupMap.reduce(0) { mask, ids in
+                    book.group & ids.key == 0 ? mask : mask | ids.value
+                }
+                return local
+            }
+            while let book = onlineBooks.next() { shelf.append(book) }
+            let groups = incoming.groups.isEmpty ? [WebDAVSnapshot.defaultGroup] : incoming.groups
+            let marks = (incoming.bookmarks + deviceMarks).sorted { $0.time < $1.time }
+            try replaceBookSources(incoming.sources)
+            let oldNames = Dictionary(uniqueKeysWithValues: books.map { ($0.id, WebDAVBookIdentity($0)) })
+            if incoming.books.contains(where: { book in oldNames[book.id].map { $0 != WebDAVBookIdentity(book) } ?? false }) {
+                // Two retained books can exchange (name, author). Reserve unique, non-TEXT keys
+                // until writeBooks assigns their final names, without deleting chapter parents.
+                try Self.execute(handle, "UPDATE books SET name = CAST(book_url AS BLOB)")
+            }
+            try writeBooks(shelf)
+            try replaceBookGroups(groups)
+            try replaceBookmarks(marks)
+            try markLegacyShelfImported()
+            return (shelf, groups, incoming.sources, marks)
+        }
+    }
+
+    private static func deviceGroupMap(mask: Int64, from old: [BookGroup], to new: [BookGroup]) throws -> [Int64: Int64] {
+        var map = [Int64: Int64]()
+        let oldNames = Dictionary(grouping: old.filter { $0.groupId > 0 }, by: \.groupName)
+        let newNames = Dictionary(grouping: new.filter { $0.groupId > 0 }, by: \.groupName)
+        for group in old where group.groupId > 0 && mask & group.groupId != 0 {
+            guard group.groupId.nonzeroBitCount == 1, oldNames[group.groupName]?.count == 1,
+                  let matches = newNames[group.groupName], matches.count == 1, let target = matches.first,
+                  target.groupId.nonzeroBitCount == 1 else {
+                throw LegadoDatabaseError.execute("本地书分组「\(group.groupName)」在两端无法唯一匹配。请先调整本地书的分组再恢复。")
+            }
+            map[group.groupId] = target.groupId
+        }
+        guard map.keys.reduce(0, |) == mask else {
+            throw LegadoDatabaseError.execute("本地书引用了未知分组，请先调整本地书的分组再恢复。")
+        }
+        return map
+    }
+
+    private func webDAVSnapshot(books: [Book], bookmarks: [Bookmark]) throws -> WebDAVSnapshot {
+        let deviceNames = Set(books.filter(WebDAVSnapshot.isDeviceBook).map(WebDAVBookIdentity.init))
+        var snapshot = try WebDAVSnapshot(
+            version: 1, books: books.filter { !WebDAVSnapshot.isDeviceBook($0) },
+            groups: loadBookGroups(), sources: loadBookSources(),
+            bookmarks: bookmarks.filter { !WebDAVSnapshot.isDeviceBookmark($0, localBooks: deviceNames) }
+        )
+        snapshot.normalize()
+        return snapshot
     }
 
     public func loadBookSources() throws -> [BookSource] {
@@ -823,6 +1023,11 @@ public actor LegadoDatabase {
         }
     }
 
+    // Once all four portable tables have been read or restored, an empty table is a user deletion.
+    private func markLegacyShelfImported() throws {
+        try Self.execute(handle, "INSERT OR IGNORE INTO legacy_imports(key) VALUES('webdav.legacyShelfImported')")
+    }
+
     public func importLegacyJSON(
         bookSourcesURL: URL?,
         booksURL: URL?,
@@ -831,32 +1036,35 @@ public actor LegadoDatabase {
         bookmarksURL: URL? = nil,
         readRecordsURL: URL? = nil
     ) throws {
-        if let bookSourcesURL, try count("book_sources") == 0,
+        let allowShelfImport = try Self.scalarInt32(handle, "SELECT COUNT(*) FROM legacy_imports WHERE key = 'webdav.legacyShelfImported'") == 0
+        if allowShelfImport, let bookSourcesURL, try count("book_sources") == 0,
            FileManager.default.fileExists(atPath: bookSourcesURL.path) {
             try replaceBookSources(decoder.decode([BookSource].self, from: Data(contentsOf: bookSourcesURL)))
         }
-        if let booksURL, try count("books") == 0,
+        if allowShelfImport, let booksURL, try count("books") == 0,
            FileManager.default.fileExists(atPath: booksURL.path) {
             try replaceBooks(decoder.decode([Book].self, from: Data(contentsOf: booksURL)))
         }
         if let chaptersDirectory, !legacyChaptersImported() {
             if try count("chapters") == 0,
                FileManager.default.fileExists(atPath: chaptersDirectory.path) {
+                // After the legacy shelf is imported, its old chapter files may refer to deleted books.
+                let currentBookIDs = allowShelfImport ? nil : Set(try loadBooks().map(\.id))
                 for url in try FileManager.default.contentsOfDirectory(at: chaptersDirectory, includingPropertiesForKeys: nil)
                     where url.pathExtension.lowercased() == "json" {
                     let chapters = try decoder.decode([BookChapter].self, from: Data(contentsOf: url))
-                    if let bookURL = chapters.first?.bookUrl, !bookURL.isEmpty {
+                    if let bookURL = chapters.first?.bookUrl, !bookURL.isEmpty, currentBookIDs?.contains(bookURL) != false {
                         try replaceChapters(chapters, bookURL: bookURL)
                     }
                 }
             }
             try Self.execute(handle, "INSERT OR IGNORE INTO legacy_imports(key) VALUES('chapters')")
         }
-        if let bookmarksURL, try count("bookmarks") == 0,
+        if allowShelfImport, let bookmarksURL, try count("bookmarks") == 0,
            FileManager.default.fileExists(atPath: bookmarksURL.path) {
             try replaceBookmarks(decoder.decode([Bookmark].self, from: Data(contentsOf: bookmarksURL)))
         }
-        if let bookGroupsURL, try count("book_groups") == 0,
+        if allowShelfImport, let bookGroupsURL, try count("book_groups") == 0,
            FileManager.default.fileExists(atPath: bookGroupsURL.path) {
             try replaceBookGroups(decoder.decode([BookGroup].self, from: Data(contentsOf: bookGroupsURL)))
         }
@@ -1166,11 +1374,14 @@ public actor LegadoDatabase {
         }
     }
 
-    private func transaction(_ operation: () throws -> Void) throws {
+    private func transaction<T>(_ operation: () throws -> T) throws -> T {
+        // Bulk restores compose existing writes in one transaction on this actor's connection.
+        if sqlite3_get_autocommit(handle) == 0 { return try operation() }
         try Self.execute(handle, "BEGIN IMMEDIATE")
         do {
-            try operation()
+            let result = try operation()
             try Self.execute(handle, "COMMIT")
+            return result
         } catch {
             try? Self.execute(handle, "ROLLBACK")
             throw error
