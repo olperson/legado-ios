@@ -25,9 +25,17 @@ final class WebDAVConnectionUITests: XCTestCase {
         let address = app.textFields["WebDAV 目录地址"]
         XCTAssertEqual(address.value as? String, "https://dav.jianguoyun.com/dav/legado/")
 
-        // A triple tap selects the full URL, including its punctuation.
+        // The URL keyboard can select only one hostname segment. Delete the visible
+        // text from the trailing edge until the field is empty before typing a new URL.
         address.tap()
-        address.tap(withNumberOfTaps: 3, numberOfTouches: 1)
+        while let current = address.value as? String, !current.isEmpty, current != address.placeholderValue {
+            address.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: 0.5)).tap()
+            address.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count))
+            let remaining = address.value as? String ?? ""
+            guard remaining.isEmpty || remaining == address.placeholderValue || remaining.count < current.count else {
+                return XCTFail("Could not clear the WebDAV address field.")
+            }
+        }
         address.typeText(directory + "\n")
         XCTAssertEqual(address.value as? String, directory)
         let tools = app.buttons["backup.connection.tools"]
