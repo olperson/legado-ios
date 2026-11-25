@@ -8,6 +8,7 @@
 /* Begin PBXBuildFile section */
 		DA1000000000000000000002 /* AppearanceContrastTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA2000000000000000000002; };
 		DA1000000000000000000001 /* DarkModeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA2000000000000000000001; };
+		DA1000000000000000000003 /* WebDAVConnectionUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA2000000000000000000003; };
 		B10000000000000000000050 = {isa = PBXBuildFile; fileRef = B20000000000000000000050; };
 		BAA000000000000000000031 /* BackupSessionStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAB000000000000000000031; };
 		BAA000000000000000000030 /* WebDAVBackupIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAB000000000000000000030; };
@@ -77,6 +78,7 @@
 		BAA000000000000000000020 /* BackupSchedule.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAB000000000000000000020 /* BackupSchedule.swift */; };
 		BAA000000000000000000021 /* FullBackupArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAB000000000000000000021 /* FullBackupArchive.swift */; };
 		BAA000000000000000000022 /* FullBackupPortability.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAB000000000000000000022 /* FullBackupPortability.swift */; };
+		D7A000000000000000000013 /* WebDAVAddress.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7B000000000000000000013 /* WebDAVAddress.swift */; };
 		D7A000000000000000000003 /* WebDAVSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7B000000000000000000003 /* WebDAVSync.swift */; };
 		C10000000000000000000010 /* BookSearchService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000010 /* BookSearchService.swift */; };
 		C10000000000000000000011 /* HTMLRuleEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000011 /* HTMLRuleEvaluator.swift */; };
@@ -155,6 +157,7 @@
 /* Begin PBXFileReference section */
 		DA2000000000000000000002 /* AppearanceContrastTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/LegadoReaderTests/AppearanceContrastTests.swift; sourceTree = SOURCE_ROOT; };
 		DA2000000000000000000001 /* DarkModeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/LegadoReaderUITests/DarkModeUITests.swift; sourceTree = SOURCE_ROOT; };
+		DA2000000000000000000003 /* WebDAVConnectionUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/LegadoReaderUITests/WebDAVConnectionUITests.swift; sourceTree = SOURCE_ROOT; };
 		B20000000000000000000050 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/LegadoReaderUITests/ReaderScrollGestureTests.swift; sourceTree = SOURCE_ROOT; };
 		B20000000000000000000051 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = LegadoReaderUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		BAB000000000000000000031 /* BackupSessionStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/LegadoReaderTests/BackupSessionStateTests.swift; sourceTree = SOURCE_ROOT; };
@@ -224,6 +227,7 @@
 		BAB000000000000000000020 /* BackupSchedule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LegadoCore/Sync/BackupSchedule.swift; sourceTree = SOURCE_ROOT; };
 		BAB000000000000000000021 /* FullBackupArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LegadoCore/Sync/FullBackupArchive.swift; sourceTree = SOURCE_ROOT; };
 		BAB000000000000000000022 /* FullBackupPortability.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LegadoCore/Sync/FullBackupPortability.swift; sourceTree = SOURCE_ROOT; };
+		D7B000000000000000000013 /* WebDAVAddress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LegadoCore/Sync/WebDAVAddress.swift; sourceTree = SOURCE_ROOT; };
 		D7B000000000000000000003 /* WebDAVSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LegadoCore/Sync/WebDAVSync.swift; sourceTree = SOURCE_ROOT; };
 		C20000000000000000000010 /* BookSearchService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookSearchService.swift; sourceTree = "<group>"; };
 		C20000000000000000000011 /* HTMLRuleEvaluator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTMLRuleEvaluator.swift; sourceTree = "<group>"; };
@@ -333,6 +337,7 @@
 				B20000000000000000000030 /* ReaderScrollGeometryTests.swift */,
 				BC2000000000000000000001 /* WebReaderBridgeTests.swift */, ED2000000000000000000003 /* EPUBReaderIntegrationTests.swift */,
 				DA2000000000000000000001 /* DarkModeUITests.swift */,
+				DA2000000000000000000003 /* WebDAVConnectionUITests.swift */,
 				DA2000000000000000000002 /* AppearanceContrastTests.swift */,
 				A30000000000000000000001 /* App */,
 				C30000000000000000000001 /* LegadoCore */,
@@ -542,6 +547,7 @@
 				BAB000000000000000000020 /* BackupSchedule.swift */,
 				BAB000000000000000000021 /* FullBackupArchive.swift */,
 				BAB000000000000000000022 /* FullBackupPortability.swift */,
+				D7B000000000000000000013 /* WebDAVAddress.swift */,
 				D7B000000000000000000003 /* WebDAVSync.swift */,
 				C20000000000000000000021 /* BookSourceHeaderResolver.swift */,
 			);
@@ -768,7 +774,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		B30000000000000000000050 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B10000000000000000000050, AA1100000000000000000009, AA1100000000000000000010, DA1000000000000000000001); runOnlyForDeploymentPostprocessing = 0; };
+		B30000000000000000000050 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B10000000000000000000050, AA1100000000000000000009, AA1100000000000000000010, DA1000000000000000000001, DA1000000000000000000003); runOnlyForDeploymentPostprocessing = 0; };
 		B30000000000000000000030 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (BAA000000000000000000030, BAA000000000000000000031, B10000000000000000000030, BC1000000000000000000001, ED1000000000000000000003, DA1000000000000000000002); runOnlyForDeploymentPostprocessing = 0; };
 		D30000000000000000000002 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -858,6 +864,7 @@
 				BAA000000000000000000020 /* BackupSchedule.swift in Sources */,
 				BAA000000000000000000021 /* FullBackupArchive.swift in Sources */,
 				BAA000000000000000000022 /* FullBackupPortability.swift in Sources */,
+				D7A000000000000000000013 /* WebDAVAddress.swift in Sources */,
 				D7A000000000000000000003 /* WebDAVSync.swift in Sources */,
 				C10000000000000000000010 /* BookSearchService.swift in Sources */,
 				C10000000000000000000011 /* HTMLRuleEvaluator.swift in Sources */,
@@ -966,12 +973,12 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 38;
 				DEVELOPMENT_ASSET_PATHS = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 0.1.22;
+				MARKETING_VERSION = 0.1.23;
 				OTHER_LDFLAGS = "$(inherited) -lsqlite3";
 				PRODUCT_BUNDLE_IDENTIFIER = com.epiboly.legado;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -987,11 +994,11 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 38;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 0.1.22;
+				MARKETING_VERSION = 0.1.23;
 				OTHER_LDFLAGS = "$(inherited) -lsqlite3";
 				PRODUCT_BUNDLE_IDENTIFIER = com.epiboly.legado;
 				PRODUCT_NAME = "$(TARGET_NAME)";

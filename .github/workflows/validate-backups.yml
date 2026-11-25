@@ -128,13 +128,14 @@ jobs:
         shell: bash
         env:
           SCHEME: LegadoReaderUITests
-          MINIMUM_TESTS: 3
+          MINIMUM_TESTS: 4
           # Files may traverse several provider screens on the Intel simulator.
           TEST_ALLOWANCE: 600
           TEST_CASES: >-
             ReaderScrollGestureTests/testLocalZIPBackupAndRestoreWithoutWebDAV
             ReaderScrollGestureTests/testLocalBackupHistoryRestoreWithoutWebDAV
             ReaderScrollGestureTests/testWebDAVSyncShowsUploadedZIPInRemoteHistory
+            WebDAVConnectionUITests/testNutstoreTemplateAndLoopbackBackupProperties
         run: &run_iphone_tests |
           set -euo pipefail
           result="$RUNNER_TEMP/$SCHEME.xcresult"

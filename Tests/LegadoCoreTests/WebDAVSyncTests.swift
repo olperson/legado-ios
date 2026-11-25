@@ -32,6 +32,55 @@ struct WebDAVSyncTests {
         #expect(WebDAVSync.fingerprint(Data("abc".utf8)) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
     }
 
+    @Test func completesDirectoryAddressesWithoutChangingSelectedPaths() throws {
+        let addresses = [
+            ("  dav.example.test  ", "https://dav.example.test/"),
+            ("http://localhost:8081", "http://localhost:8081/"),
+            ("localhost:8443/prefix", "https://localhost:8443/prefix/"),
+            ("[::1]:8443/书架/My%20Books", "https://[::1]:8443/%E4%B9%A6%E6%9E%B6/My%20Books/"),
+            ("dav.jianguoyun.com", "https://dav.jianguoyun.com/dav/"),
+            ("dav.jianguoyun.com/", "https://dav.jianguoyun.com/"),
+            ("dav.jianguoyun.com/archive", "https://dav.jianguoyun.com/archive/"),
+            ("dav.test/My%20Books/[25%]?item[]=a%2Fb", "https://dav.test/My%20Books/%5B25%25%5D/?item%5B%5D=a%2Fb"),
+            ("https://dav.example.test/p%2Fq?token=a%2Bb#bookmark", "https://dav.example.test/p%2Fq/?token=a%2Bb")
+        ]
+        for (input, expected) in addresses {
+            let directory = try WebDAVAddress.complete(input)
+            #expect(directory.absoluteString == expected)
+            #expect(try WebDAVAddress.complete(directory.absoluteString) == directory)
+            let client = try WebDAVSync(directoryURL: input, username: "", password: "")
+            #expect(client.fileURL == directory.appendingPathComponent("legado-sync.json"))
+        }
+        for input in ["", "http://", "/directory", "not a host", "ftp://dav.test/a", "mailto:user@example.test"] {
+            #expect(throws: WebDAVSyncError.invalidDirectory) { try WebDAVAddress.complete(input) }
+        }
+    }
+
+    @Test func appliesServicePresetsWithoutDuplicatingRoutesOrExposingCredentials() throws {
+        let nextcloud = WebDAVAddress.Preset.nextcloud
+        let base = "http://user:secret@localhost:8080/Cloud%20Drive"
+        let endpoint = "http://localhost:8080/Cloud%20Drive/remote.php/dav/files/%E8%AF%BB%E8%80%85%20%2F%23/"
+        #expect(try nextcloud.directory(for: base, username: "读者 /#") == endpoint)
+        #expect(try nextcloud.directory(for: endpoint, username: "读者 /#") == endpoint)
+        #expect(try nextcloud.directory(for: endpoint + "books/", username: "new") ==
+                "http://localhost:8080/Cloud%20Drive/remote.php/dav/files/new/books/")
+        #expect(throws: (any Error).self) { try nextcloud.directory(for: base, username: "") }
+        let alist = WebDAVAddress.Preset.alist
+        #expect(try alist.directory(for: base, username: "") == "http://localhost:8080/Cloud%20Drive/dav/")
+        #expect(try alist.directory(for: "dav.test/p/dav/books", username: "") == "https://dav.test/p/dav/books/")
+        #expect(try WebDAVAddress.Preset.nutstore.directory(for: base + "?token=secret", username: "user") ==
+                "https://dav.jianguoyun.com/dav/legado/")
+    }
+
+    @Test func acceptsEmbeddedAuthenticationWithoutIncludingItInRequestURLs() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [WebDAVFixtureProtocol.self]
+        let client = try WebDAVSync(directoryURL: "https://reader:t%65st@dav.test/existing?token=a%2Bb",
+                                    username: "", password: "", configuration: configuration)
+        #expect(client.fileURL.absoluteString == "https://dav.test/existing/legado-sync.json?token=a%2Bb")
+        #expect(try await client.fetch()?.data == Data("{}".utf8))
+    }
+
     @Test func readsAndWritesLegacySnapshotsWithoutConditionalHeaders() async throws {
         let existing = try makeClient("existing")
         let snapshot = try #require(try await existing.fetch())

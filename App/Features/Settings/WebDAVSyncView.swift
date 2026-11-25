@@ -20,7 +20,7 @@ struct WebDAVSyncView: View {
     @State private var review: Review?
 
     private enum BackupSheet: Identifiable {
-        case local([LocalBackupFile]), remote([WebDAVBackupFile]), file
+        case local([LocalBackupFile]), remote([WebDAVBackupFile], WebDAVSync), file
 
         var id: String {
             switch self {
@@ -114,8 +114,12 @@ struct WebDAVSyncView: View {
                 } onCancel: {
                     select(nil)
                 }
-            case .local, .remote:
-                historyView(presented)
+            case .local(let files):
+                localHistoryView(files)
+            case .remote(let files, let client):
+                RemoteBackupHistoryView(files: files, client: client, onCancel: { select(nil) }) { file, isLatest in
+                    select(.backup(.remote(file, isLatest: isLatest)))
+                }
             }
         }
         .alert(review?.title ?? "恢复备份", isPresented: Binding(
@@ -141,10 +145,27 @@ struct WebDAVSyncView: View {
 
     private var connectionSection: some View {
         Section {
-            TextField("WebDAV 目录地址", text: $account.directory)
-            .keyboardType(.URL)
-            .textInputAutocapitalization(.never)
-            .disableAutocorrection(true)
+            HStack {
+                TextField("WebDAV 目录地址", text: $account.directory)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .disableAutocorrection(true)
+                Menu {
+                    ForEach(WebDAVAddress.Preset.allCases, id: \.self) { preset in
+                        Button(preset.title) {
+                            do {
+                                try account.apply(preset)
+                                message = nil
+                            } catch { message = error.localizedDescription }
+                        }
+                    }
+                } label: {
+                    Label("地址模板", systemImage: "list.bullet")
+                        .labelStyle(.iconOnly)
+                }
+                .accessibilityIdentifier("backup.address.templates")
+                .buttonStyle(.borderless)
+            }
             TextField("用户名", text: $account.username)
             .textContentType(.username)
             .textInputAutocapitalization(.never)
@@ -154,29 +175,46 @@ struct WebDAVSyncView: View {
             Group {
                 Button("保存连接") {
                     do {
-                        try account.save()
+                        try saveConnection()
                         message = "WebDAV 连接已保存。"
                     } catch { message = error.localizedDescription }
                 }
                 Button("立即同步") {
                     perform("正在同步…") {
-                        try account.save()
+                        try saveConnection()
                         let result = try await WebDAVBackupService.shared.sync(database: database(), account: account)
                         try didSynchronize(result)
                     }
                 }
-                Button("从 WebDAV 选择备份恢复") {
-                    perform("正在读取备份列表…") {
-                        let files = try await savedClient().listBackups(includeOtherArchives: true)
-                        present(.remote(files))
+                Button("从 WebDAV 选择备份恢复") { openRemoteHistory() }
+                Menu("连接工具") {
+                    Button("测试连接") {
+                        perform("正在连接目录…") {
+                            try await connectionClient().checkConnection()
+                            message = "已连接到 WebDAV 目录。"
+                        }
+                    }
+                    Button("查看服务器支持的方法") {
+                        perform("正在查询服务器方法…") {
+                            let methods = try await connectionClient().allowedMethods()
+                            message = methods.isEmpty ? "服务器没有在 OPTIONS 响应中列出方法。"
+                                : "服务器声明支持：" + methods.joined(separator: "、")
+                        }
+                    }
+                    Button("创建此备份目录") {
+                        perform("正在创建备份目录…") {
+                            try await connectionClient().createBackupDirectory()
+                            message = "备份目录已就绪。"
+                        }
                     }
                 }
+                .accessibilityIdentifier("backup.connection.tools")
             }
             .disabled(account.directory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } header: {
             Text("WebDAV 服务器")
         } footer: {
-            Text("填写存放 ZIP 的目录地址，例如 https://服务器/dav/legado/。同步时会自动创建缺少的目录。")
+            Text("可直接输入主机名，或从地址模板选择服务。已有备份时请填写原目录。")
         }
         .disabled(work != nil)
     }
@@ -238,54 +276,33 @@ struct WebDAVSyncView: View {
         }
     }
 
-    private func historyView(_ presented: BackupSheet) -> some View {
+    private func openRemoteHistory() {
+        perform("正在读取备份列表…") {
+            let client = try savedClient()
+            let files = try await client.listBackups(includeOtherArchives: true)
+            present(.remote(files, client))
+        }
+    }
+
+    private func localHistoryView(_ files: [LocalBackupFile]) -> some View {
         ReadingNavigationStack {
             List {
-                switch presented {
-                case .local(let files):
-                    if files.isEmpty { Text("本机还没有备份。").foregroundStyle(.secondary) }
-                    ForEach(files) { file in
-                        Button { select(.backup(.onDevice(file))) } label: {
-                            backupLabel(name: file.name, date: file.date, size: file.size)
-                        }
-                        .accessibilityLabel(file.name)
-                        .accessibilityValue(file.date.formatted(date: .abbreviated, time: .standard))
-                        .accessibilityIdentifier("backup.local." + file.name)
+                if files.isEmpty { Text("本机还没有备份。").foregroundStyle(.secondary) }
+                ForEach(files) { file in
+                    Button { select(.backup(.onDevice(file))) } label: {
+                        BackupHistoryLabel(name: file.name, date: file.date, size: file.size)
                     }
-                case .remote(let files):
-                    if files.isEmpty { Text("这个目录还没有备份。").foregroundStyle(.secondary) }
-                    let latest = files.first(where: \.isSyncArchive)
-                    ForEach(files) { file in
-                        Button { select(.backup(.remote(file, isLatest: file == latest))) } label: {
-                            backupLabel(name: file.name, date: file.date, size: file.size, legacy: file.isLegacySnapshot)
-                        }
-                        .accessibilityLabel(file.name)
-                        .accessibilityValue(file.date.formatted(date: .abbreviated, time: .standard))
-                        .accessibilityIdentifier("backup.remote." + file.name)
-                    }
-                case .file:
-                    EmptyView()
+                    .accessibilityLabel(file.name)
+                    .accessibilityValue(file.date.formatted(date: .abbreviated, time: .standard))
+                    .accessibilityIdentifier("backup.local." + file.name)
                 }
             }
-            .navigationTitle(presented.id == "local" ? "本机备份" : "云端备份")
+            .navigationTitle("本机备份")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { select(nil) }
                 }
-            }
-        }
-    }
-
-    private func backupLabel(name: String, date: Date, size: Int64?, legacy: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(date.formatted(date: .abbreviated, time: .standard)).foregroundStyle(.primary)
-            Text(name).font(.caption).foregroundStyle(.secondary)
-            if legacy {
-                Text("旧版同步文件").font(.caption).foregroundStyle(.secondary)
-            } else if let size {
-                Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
-                    .font(.caption).foregroundStyle(.secondary)
             }
         }
     }
@@ -307,10 +324,19 @@ struct WebDAVSyncView: View {
         return database
     }
 
-    private func savedClient() throws -> WebDAVSync {
-        let client = try account.makeClient()
+    private func connectionClient() throws -> WebDAVSync {
+        try account.completeDirectory()
+        return try account.makeClient()
+    }
+
+    private func saveConnection() throws {
+        try account.completeDirectory()
         try account.save()
-        return client
+    }
+
+    private func savedClient() throws -> WebDAVSync {
+        try saveConnection()
+        return try account.makeClient()
     }
 
     private func uploadLocal() {
@@ -385,6 +411,238 @@ struct WebDAVSyncView: View {
     }
 }
 
+private struct BackupHistoryLabel: View {
+    let name: String
+    let date: Date
+    let size: Int64?
+    var legacy = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(date.formatted(date: .abbreviated, time: .standard)).foregroundStyle(.primary)
+            Text(name).font(.caption).foregroundStyle(.secondary)
+            if legacy {
+                Text("旧版同步文件").font(.caption).foregroundStyle(.secondary)
+            } else if let size {
+                Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+@MainActor
+private struct RemoteBackupHistoryView: View {
+    @State private var files: [WebDAVBackupFile]
+    let client: WebDAVSync
+    let onCancel: () -> Void
+    let onRestore: (WebDAVBackupFile, Bool) -> Void
+
+    private enum Transfer: String {
+        case copy = "复制", rename = "重命名"
+    }
+
+    private enum Prompt {
+        case properties(WebDAVBackupFile, Int64?), delete(WebDAVBackupFile)
+
+        var title: String {
+            switch self {
+            case .properties: "文件属性"
+            case .delete: "删除云端备份？"
+            }
+        }
+
+        var detail: String {
+            switch self {
+            case .properties(let file, let bytes):
+                let size = bytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
+                let date = file.date == .distantPast ? "" : "\n日期：\(file.date.formatted(date: .abbreviated, time: .standard))"
+                return "\(file.name)\(date)\n大小：\(size ?? "服务器未提供")"
+            case .delete(let file):
+                return "将从 WebDAV 目录删除“\(file.name)”。此操作无法撤销。"
+            }
+        }
+    }
+
+    @State private var editing: (action: Transfer, file: WebDAVBackupFile)?
+    @State private var destination = ""
+    @State private var prompt: Prompt?
+    @State private var progress: String?
+    @State private var notice: String?
+    @State private var hasCompleteListing = true
+
+    init(files: [WebDAVBackupFile], client: WebDAVSync, onCancel: @escaping () -> Void,
+         onRestore: @escaping (WebDAVBackupFile, Bool) -> Void) {
+        _files = State(initialValue: files)
+        self.client = client
+        self.onCancel = onCancel
+        self.onRestore = onRestore
+    }
+
+    var body: some View {
+        ReadingNavigationStack {
+            Group {
+                if let editing {
+                    Form {
+                        Section("原文件") { Text(editing.file.name) }
+                        Section("新文件名") {
+                            TextField("文件名.zip", text: $destination)
+                                .textInputAutocapitalization(.never)
+                                .disableAutocorrection(true)
+                                .accessibilityIdentifier("backup.remote.filename")
+                        }
+                    }
+                } else {
+                    fileList
+                }
+            }
+            .disabled(progress != nil)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if let text = progress ?? notice {
+                    HStack {
+                        if progress != nil { ProgressView() }
+                        Text(text).font(.callout).accessibilityIdentifier("backup.remote.status")
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal).padding(.vertical, 8)
+                    .background(.bar)
+                }
+            }
+            .navigationTitle(editing.map { $0.action.rawValue + "备份" } ?? "云端备份")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        if editing == nil {
+                            onCancel()
+                        } else {
+                            editing = nil
+                            notice = nil
+                        }
+                    }
+                    .disabled(progress != nil)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    if let editing {
+                        Button(editing.action.rawValue) { transfer(editing.action, editing.file, to: destination) }
+                            .disabled(progress != nil || destination.isEmpty || destination == editing.file.name)
+                    } else {
+                        Button { run("正在刷新列表…") { try await reload() } } label: {
+                            Label("刷新", systemImage: "arrow.clockwise")
+                        }
+                        .disabled(progress != nil)
+                    }
+                }
+            }
+            .alert(prompt?.title ?? "", isPresented: Binding(
+                get: { prompt != nil }, set: { if !$0 { prompt = nil } }
+            ), presenting: prompt) { selected in
+                switch selected {
+                case .properties:
+                    Button("好") {}
+                case .delete(let file):
+                    Button("删除", role: .destructive) {
+                        run("正在删除备份…") {
+                            try await client.deleteBackup(file)
+                            files.removeAll { $0.id == file.id }
+                            await refreshAfterChange("已删除“\(file.name)”。")
+                        }
+                    }
+                    Button("取消", role: .cancel) {}
+                }
+            } message: { selected in
+                Text(selected.detail)
+            }
+        }
+        .interactiveDismissDisabled(progress != nil)
+    }
+
+    private var fileList: some View {
+        List {
+            if files.isEmpty && hasCompleteListing { Text("这个目录还没有备份。").foregroundStyle(.secondary) }
+            let latest = hasCompleteListing ? files.first(where: \.isSyncArchive) : nil
+            ForEach(files) { file in
+                HStack {
+                    Button { onRestore(file, file == latest) } label: {
+                        BackupHistoryLabel(name: file.name, date: file.date, size: file.size, legacy: file.isLegacySnapshot)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(file.name)
+                    .accessibilityValue(file.date.formatted(date: .abbreviated, time: .standard))
+                    .accessibilityIdentifier("backup.remote." + file.name)
+                    Menu {
+                        Button("属性") {
+                            run("正在读取文件属性…") {
+                                let bytes = try await client.backupSize(file)
+                                prompt = .properties(file, bytes)
+                            }
+                        }
+                        if !file.isLegacySnapshot {
+                            Button("复制") { edit(.copy, file) }
+                            Button("重命名") { edit(.rename, file) }
+                            Button("删除", role: .destructive) { prompt = .delete(file) }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle").frame(minWidth: 44, minHeight: 44)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("\(file.name)的更多操作")
+                    .accessibilityIdentifier("backup.remote.actions." + file.name)
+                }
+            }
+        }
+    }
+
+    private func edit(_ action: Transfer, _ file: WebDAVBackupFile) {
+        notice = nil
+        destination = action == .copy ? String(file.name.dropLast(4)) + " 副本.zip" : file.name
+        editing = (action, file)
+    }
+
+    private func transfer(_ action: Transfer, _ file: WebDAVBackupFile, to name: String) {
+        run("正在\(action.rawValue)备份…") {
+            switch action {
+            case .copy:
+                try await client.copyBackup(file, to: name)
+            case .rename:
+                try await client.moveBackup(file, to: name)
+                files.removeAll { $0.id == file.id }
+            }
+            editing = nil
+            await refreshAfterChange("已\(action.rawValue)为“\(name)”。")
+        }
+    }
+
+    private func run(_ description: String, _ operation: @escaping @MainActor () async throws -> Void) {
+        guard progress == nil else { return }
+        progress = description
+        notice = nil
+        Task {
+            defer { progress = nil }
+            do { try await operation() }
+            catch { notice = error.localizedDescription }
+        }
+    }
+
+    private func reload() async throws {
+        files = try await client.listBackups(includeOtherArchives: true)
+        hasCompleteListing = true
+    }
+
+    private func refreshAfterChange(_ receipt: String) async {
+        hasCompleteListing = false
+        progress = "正在刷新列表…"
+        do {
+            try await reload()
+            notice = receipt
+        } catch {
+            notice = "\(receipt) 列表刷新失败：\(error.localizedDescription) 请点“刷新”重试。"
+        }
+    }
+}
+
 final class TemporaryBackup: Sendable {
     let url: URL
     let name: String
@@ -435,6 +693,38 @@ struct WebDAVAccount: Codable, Equatable, Sendable {
     var directory = ""
     var username = ""
     var password = ""
+
+    mutating func completeDirectory() throws {
+        let url = try WebDAVAddress.complete(directory)
+        guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            throw WebDAVSyncError.invalidDirectory
+        }
+        if username.isEmpty {
+            username = parts.user ?? ""
+            if password.isEmpty { password = parts.password ?? "" }
+        }
+        parts.user = nil
+        parts.password = nil
+        parts.fragment = nil
+        guard let address = parts.url else { throw WebDAVSyncError.invalidDirectory }
+        directory = address.absoluteString
+    }
+
+    mutating func apply(_ preset: WebDAVAddress.Preset) throws {
+        let old = try? WebDAVAddress.complete(directory)
+        let login = old.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.user }
+        let address = try preset.directory(for: directory, username: username.isEmpty ? login ?? "" : username)
+        if let old, let new = URL(string: address) {
+            func port(_ url: URL) -> Int { url.port ?? (url.scheme?.lowercased() == "https" ? 443 : 80) }
+            if old.host?.lowercased() != new.host?.lowercased() ||
+                old.scheme?.lowercased() != new.scheme?.lowercased() || port(old) != port(new) {
+                password = ""
+            } else {
+                try completeDirectory()
+            }
+        }
+        directory = address
+    }
 
     private static var query: [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
