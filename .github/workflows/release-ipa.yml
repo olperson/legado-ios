@@ -24,6 +24,7 @@ jobs:
     outputs:
       tag: ${{ steps.request.outputs.tag }}
       resume_run: ${{ steps.request.outputs.resume_run }}
+      artifact_run: ${{ steps.request.outputs.artifact_run }}
     steps:
       - name: Read the requested version
         id: request
@@ -39,10 +40,14 @@ jobs:
             subject=${HEAD_MESSAGE%%$'\n'*}
             [[ "$subject" =~ ^发布\ IPA\ (v[0-9]+\.[0-9]+\.[0-9]+)$ ]] || exit 0
             tag=${BASH_REMATCH[1]}
-            trailer=$(git interpret-trailers --parse <<< "$HEAD_MESSAGE" | sed -n '/^Resume-Run:/p')
+            trailer=$(git interpret-trailers --parse <<< "$HEAD_MESSAGE" | sed -nE '/^(Resume-Run|Reuse-Build):/Ip')
             if [[ -n "$trailer" ]]; then
-              [[ "$trailer" =~ ^Resume-Run:\ ([1-9][0-9]*)$ ]] || { echo "Expected one numeric Resume-Run trailer" >&2; exit 1; }
-              echo "resume_run=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+              [[ "$trailer" =~ ^(Resume-Run|Reuse-Build):\ ([1-9][0-9]*)$ ]] ||
+                { echo "Expected a single Resume-Run or Reuse-Build trailer with a numeric run ID" >&2; exit 1; }
+              mode=${BASH_REMATCH[1]}
+              run_id=${BASH_REMATCH[2]}
+              echo "artifact_run=$run_id" >> "$GITHUB_OUTPUT"
+              if [[ "$mode" == Resume-Run ]]; then echo "resume_run=$run_id" >> "$GITHUB_OUTPUT"; fi
             fi
           else
             tag=$GITHUB_REF_NAME
@@ -52,7 +57,7 @@ jobs:
 
   build:
     needs: request
-    if: needs.request.outputs.tag != '' && needs.request.outputs.resume_run == ''
+    if: needs.request.outputs.tag != '' && needs.request.outputs.artifact_run == ''
     env:
       RELEASE_TAG: ${{ needs.request.outputs.tag }}
     runs-on: macos-15-intel
@@ -116,8 +121,10 @@ jobs:
     needs: [request, build, test-reader, test-backups]
     if: >-
       !cancelled() && needs.request.result == 'success' && needs.test-backups.result == 'success' &&
-      ((needs.request.outputs.resume_run == '' && needs.build.result == 'success' && needs.test-reader.result == 'success') ||
-       (needs.request.outputs.resume_run != '' && needs.build.result == 'skipped' && needs.test-reader.result == 'skipped'))
+      ((needs.request.outputs.artifact_run == '' && needs.build.result == 'success') ||
+       (needs.request.outputs.artifact_run != '' && needs.build.result == 'skipped')) &&
+      ((needs.request.outputs.resume_run == '' && needs.test-reader.result == 'success') ||
+       (needs.request.outputs.resume_run != '' && needs.test-reader.result == 'skipped'))
     concurrency:
       group: release-ipa-${{ needs.request.outputs.tag }}
       cancel-in-progress: false
@@ -131,33 +138,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: ${{ needs.request.outputs.resume_run && '0' || '1' }}
-      - name: Verify the previous build and reader test
-        if: needs.request.outputs.resume_run != ''
+          fetch-depth: ${{ needs.request.outputs.artifact_run && '0' || '1' }}
+      - name: Verify the release run providing the IPA
+        if: needs.request.outputs.artifact_run != ''
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          ARTIFACT_RUN: ${{ needs.request.outputs.artifact_run }}
           RESUME_RUN: ${{ needs.request.outputs.resume_run }}
         run: |
           set -euo pipefail
-          endpoint="repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_RUN"
+          endpoint="repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACT_RUN"
           source=$(gh api "$endpoint" | jq -er --arg repo "$GITHUB_REPOSITORY" '
             select(.head_repository.full_name == $repo and .head_branch == "main" and
                    .path == ".github/workflows/release-ipa.yml" and
                    (.event == "push" or .event == "workflow_dispatch")) | .head_sha')
           [[ "$source" =~ ^[0-9a-f]{40}$ ]] && git merge-base --is-ancestor "$source" "$GITHUB_SHA" ||
             { echo "The previous release run must be from this main branch" >&2; exit 1; }
-          git diff --exit-code --name-only "$source" "$GITHUB_SHA" -- . \
-            ':(exclude).github/workflows/release-ipa.yml' ':(exclude).github/workflows/validate-backups.yml'
-          gh api --paginate --slurp "$endpoint/jobs?filter=latest&per_page=100" | jq -e '
-            [.[].jobs[] | select(.name == "build" or .name == "test-reader") | [.name, .conclusion]] | sort ==
-            [["build", "success"], ["test-reader", "success"]]'
+          exclusions=(':(exclude).github/workflows/release-ipa.yml' ':(exclude).github/workflows/validate-backups.yml')
+          required_jobs='["build", "test-reader"]'
+          if [[ -z "$RESUME_RUN" ]]; then
+            exclusions+=(':(exclude)Tests/**' ':(exclude).github/workflows/validate-reader-cover.yml')
+            required_jobs='["build"]'
+          fi
+          git diff --exit-code --name-only "$source" "$GITHUB_SHA" -- . "${exclusions[@]}"
+          gh api --paginate --slurp "$endpoint/jobs?filter=latest&per_page=100" | jq -e --argjson required "$required_jobs" '
+            [.[].jobs[] | select(.name as $name | $required | index($name)) | [.name, .conclusion]] | sort ==
+            ($required | map([., "success"]))'
       - uses: actions/download-artifact@v4
         with:
           name: unsigned-ipa
           path: ${{ runner.temp }}/dist
-          github-token: ${{ needs.request.outputs.resume_run && github.token || '' }}
-          run-id: ${{ needs.request.outputs.resume_run || github.run_id }}
+          github-token: ${{ needs.request.outputs.artifact_run && github.token || '' }}
+          run-id: ${{ needs.request.outputs.artifact_run || github.run_id }}
       - name: Publish verified release assets
         env:
           GH_TOKEN: ${{ github.token }}

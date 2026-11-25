@@ -76,29 +76,59 @@ final class ReaderScrollGestureTests: XCTestCase {
         XCTAssertFalse(app.buttons["立即同步"].isEnabled)
     }
 
-    private func revealBackupElement(_ element: XCUIElement, in app: XCUIApplication, towardBottom: Bool = true) {
-        for _ in 0..<8 {
-            let navigation = app.navigationBars.firstMatch
-            let top = (navigation.exists ? navigation.frame.maxY : app.frame.minY) + 8
-            let tabs = app.tabBars.firstMatch
-            let bottom = (tabs.exists ? tabs.frame.minY : app.frame.maxY) - 12
-            var forward = towardBottom
-            if element.exists, !element.frame.isEmpty {
-                let y = element.frame.midY
-                if element.isHittable && y > top && y < bottom { return }
-                if y <= top { forward = false }
-                if y >= bottom { forward = true }
+    @discardableResult
+    private func revealBackupElement(_ element: XCUIElement, in app: XCUIApplication, towardBottom: Bool = true) -> CGRect? {
+        let list = [app.scrollViews["profile.scroll"], app.collectionViews.firstMatch,
+                    app.tables.firstMatch, app.scrollViews.firstMatch]
+            .first { $0.exists && !$0.frame.isEmpty }
+        let navigation = app.navigationBars.firstMatch
+        let status = app.staticTexts["backup.status"]
+        let tabs = app.tabBars.firstMatch
+        let keyboard = app.keyboards.firstMatch
+        let screen = app.frame
+        for _ in 0..<16 {
+            let bounds = (list?.frame ?? screen).intersection(screen)
+            let top = max(bounds.minY, navigation.exists ? navigation.frame.maxY : bounds.minY,
+                          status.exists ? status.frame.maxY : bounds.minY) + 6
+            let bottom = min(bounds.maxY, tabs.exists ? tabs.frame.minY : bounds.maxY,
+                             keyboard.exists ? keyboard.frame.minY : bounds.maxY) - 6
+            guard bottom > top else { break }
+            let viewport = CGRect(x: bounds.minX, y: top, width: bounds.width, height: bottom - top)
+            let limit = min(340, viewport.height * 0.65)
+            var distance = towardBottom ? -limit : limit
+            if element.exists {
+                let row = element.frame
+                if !row.isEmpty {
+                    let visible = row.intersection(viewport)
+                    let margin = min(18, row.height / 2)
+                    if !visible.isEmpty, row.midY >= top + margin, row.midY <= bottom - margin {
+                        if element.isHittable { return visible }
+                        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in element.isHittable }, object: nil)
+                        if XCTWaiter.wait(for: [ready], timeout: 2) == .completed { return visible }
+                    }
+                    distance = max(-limit, min(limit, viewport.midY - row.midY))
+                    if abs(distance) < 12 { break }
+                }
             }
-            if forward { app.swipeUp(velocity: .slow) } else { app.swipeDown(velocity: .slow) }
+            // Hold before releasing so the list stops at the measured offset without coasting.
+            let start = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(
+                dx: viewport.midX - screen.minX, dy: viewport.midY - distance / 2 - screen.minY
+            ))
+            let end = start.withOffset(CGVector(dx: 0, dy: distance))
+            start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.25)
         }
         XCTFail("Could not expose \(element). " + backupState(in: app))
+        return nil
     }
 
     private func tapBackupButton(_ button: XCUIElement, in app: XCUIApplication, towardBottom: Bool = true) {
-        revealBackupElement(button, in: app, towardBottom: towardBottom)
+        guard let visible = revealBackupElement(button, in: app, towardBottom: towardBottom) else { return }
         XCTAssertTrue(button.isEnabled, backupState(in: app))
-        // Hit the visible text, including on compact Form rows with trailing blank space.
-        button.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.5)).tap()
+        // Touch the leading label inside the part of the row visible in the Form.
+        let frame = button.frame
+        button.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(
+            dx: visible.minX - frame.minX + min(36, visible.width / 2), dy: visible.midY - frame.minY
+        )).tap()
     }
 
     private func setBackupOption(_ name: String, enabled: Bool, in app: XCUIApplication) {
