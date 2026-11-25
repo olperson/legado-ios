@@ -2,6 +2,7 @@ name: Build and release IPA
 
 on:
   push:
+    branches: [main]
     tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
@@ -13,16 +14,41 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: release-ipa-${{ inputs.tag || github.ref_name }}
-  cancel-in-progress: false
-
-env:
-  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-
 jobs:
+  request:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (!github.event.deleted && (github.ref_type == 'tag' ||
+      startsWith(github.event.head_commit.message, '发布 IPA v')))
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.request.outputs.tag }}
+    steps:
+      - name: Read the requested version
+        id: request
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            tag=$INPUT_TAG
+          elif [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            subject=${HEAD_MESSAGE%%$'\n'*}
+            [[ "$subject" =~ ^发布\ IPA\ (v[0-9]+\.[0-9]+\.[0-9]+)$ ]] || exit 0
+            tag=${BASH_REMATCH[1]}
+          else
+            tag=$GITHUB_REF_NAME
+          fi
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Expected a vX.Y.Z tag" >&2; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
   build:
-    if: github.event_name == 'workflow_dispatch' || !github.event.deleted
+    needs: request
+    if: needs.request.outputs.tag != ''
+    env:
+      RELEASE_TAG: ${{ needs.request.outputs.tag }}
     runs-on: macos-15-intel
     timeout-minutes: 60
     steps:
@@ -49,7 +75,8 @@ jobs:
           retention-days: 7
 
   test-reader:
-    if: github.event_name == 'workflow_dispatch' || !github.event.deleted
+    needs: request
+    if: needs.request.outputs.tag != ''
     runs-on: macos-15-intel
     timeout-minutes: 60
     steps:
@@ -72,8 +99,20 @@ jobs:
           overwrite: true
           retention-days: 3
 
+  test-backups:
+    needs: request
+    if: needs.request.outputs.tag != ''
+    uses: ./.github/workflows/validate-backups.yml
+    with:
+      release_check: true
+
   publish:
-    needs: [build, test-reader]
+    needs: [request, build, test-reader, test-backups]
+    concurrency:
+      group: release-ipa-${{ needs.request.outputs.tag }}
+      cancel-in-progress: false
+    env:
+      RELEASE_TAG: ${{ needs.request.outputs.tag }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

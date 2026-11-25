@@ -20,7 +20,15 @@ if git ls-remote --exit-code --refs origin "$ref" > /dev/null; then
     }
 else
     status=$?
-    [[ $status == 2 && $GITHUB_EVENT_NAME == workflow_dispatch ]] || exit "$status"
+    [[ $status == 2 ]] || exit "$status"
+    if [[ $GITHUB_EVENT_NAME != workflow_dispatch ]]; then
+        subject=$(git show -s --format=%B HEAD)
+        [[ $GITHUB_EVENT_NAME == push && $GITHUB_REF == refs/heads/main &&
+           ${subject%%$'\n'*} == "发布 IPA $tag" ]] || exit 1
+        [[ $(git ls-remote --refs origin refs/heads/main | cut -f1) == "$commit" ]] || {
+            echo "A newer main commit has superseded this release request." >&2; exit 1;
+        }
+    fi
     gh api --method POST "repos/$repo/git/refs" -f ref="$ref" -f sha="$commit" > /dev/null
 fi
 

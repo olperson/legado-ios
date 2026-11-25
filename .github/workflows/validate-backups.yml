@@ -16,15 +16,43 @@ on:
       - 'Legado.xcodeproj/project.pbxproj'
       - '.github/workflows/validate-backups.yml'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      release_check:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
+  select:
+    runs-on: ubuntu-latest
+    outputs:
+      run_tests: ${{ steps.select.outputs.run_tests }}
+    steps:
+      - name: Select standalone or release verification
+        id: select
+        shell: bash
+        env:
+          RELEASE_CHECK: ${{ inputs.release_check }}
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          subject=${HEAD_MESSAGE%%$'\n'*}
+          run_tests=true
+          if [[ "$RELEASE_CHECK" != true && "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main &&
+                "$subject" =~ ^发布\ IPA\ v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            # The release workflow runs this suite at the same SHA before publishing.
+            run_tests=false
+          fi
+          echo "run_tests=$run_tests" >> "$GITHUB_OUTPUT"
+
   test:
+    needs: select
+    if: needs.select.outputs.run_tests == 'true'
     name: ${{ matrix.suite }}
     concurrency:
-      group: backup-tests-${{ github.ref }}-${{ matrix.suite }}
+      group: backup-tests-${{ inputs.release_check && github.run_id || github.ref }}-${{ matrix.suite }}
       cancel-in-progress: true
     strategy:
       fail-fast: false
@@ -95,12 +123,15 @@ jobs:
           fi
           echo "BACKUP_TEST_DEVICE=$device" >> "$GITHUB_ENV"
 
-      - name: Export and restore a ZIP through Files on the iPhone
+      - name: Verify local backup history and Files ZIP restore on the iPhone
         if: matrix.suite == 'iPhone'
         shell: bash
         env:
           SCHEME: LegadoReaderUITests
-          TEST_CASES: ReaderScrollGestureTests/testLocalZIPBackupAndRestoreWithoutWebDAV
+          MINIMUM_TESTS: 2
+          TEST_CASES: >-
+            ReaderScrollGestureTests/testLocalZIPBackupAndRestoreWithoutWebDAV
+            ReaderScrollGestureTests/testLocalBackupHistoryRestoreWithoutWebDAV
         run: &run_iphone_tests |
           set -euo pipefail
           result="$RUNNER_TEMP/$SCHEME.xcresult"
@@ -118,13 +149,14 @@ jobs:
           jq -r --arg scheme "$SCHEME" '"::notice::\($scheme) — \(.passedTests) passed, \(.failedTests) failed, \(.skippedTests) skipped"' <<< "$summary"
           jq -r '.testFailures[]? | "::error::" + .testName + " — " + (.failureText | gsub("[\n\r]+"; " ") | gsub("%"; "%25") | .[:2000])' <<< "$summary"
           if [[ $status != 0 ]]; then exit "$status"; fi
-          jq -e '.passedTests > 0 and .failedTests == 0 and .skippedTests == 0' <<< "$summary" >/dev/null
+          jq -e --argjson minimum "$MINIMUM_TESTS" '.passedTests >= $minimum and .failedTests == 0 and .skippedTests == 0' <<< "$summary" >/dev/null
 
       - name: Test clean-install restore, WebDAV and sessions on the iPhone
         if: ${{ !cancelled() && matrix.suite == 'iPhone' && steps.simulator.outcome == 'success' }}
         shell: bash
         env:
           SCHEME: LegadoReaderTests
+          MINIMUM_TESTS: 5
           TEST_CASES: WebDAVBackupIntegrationTests BackupSessionStateTests
         run: *run_iphone_tests
 

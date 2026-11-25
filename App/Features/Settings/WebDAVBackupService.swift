@@ -9,6 +9,14 @@ struct BackupSyncConflict {
     var remoteName: String { remote?.name ?? "已移除的备份" }
 }
 
+struct LocalBackupFile: Identifiable, Sendable {
+    let url: URL
+    let date: Date
+    let size: Int64?
+    var name: String { url.lastPathComponent }
+    var id: URL { url }
+}
+
 enum BackupSyncOutcome {
     case uploaded, restored, unchanged, conflict(BackupSyncConflict), legacyAvailable(WebDAVBackupFile)
 }
@@ -228,6 +236,34 @@ final class WebDAVBackupService: ObservableObject {
         let directory = documents.appendingPathComponent("Backups", isDirectory: true)
         try files.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
+    }
+
+    func backUpLocally(database: LegadoDatabase) async throws -> URL {
+        try await exclusively {
+            let targetDirectory = try Self.localBackupDirectory()
+            let archive = try await snapshot(database).url
+            defer { try? FileManager.default.removeItem(at: archive) }
+            let saved = targetDirectory.appendingPathComponent(archive.lastPathComponent)
+            try Task.checkCancellation()
+            // Both folders belong to the same app container. Publish only the finished ZIP.
+            try FileManager.default.moveItem(at: archive, to: saved)
+            return saved
+        }
+    }
+
+    nonisolated static func localBackups() async throws -> [LocalBackupFile] {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey, .contentModificationDateKey, .fileSizeKey]
+        let directory = try localBackupDirectory()
+        let urls = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: Array(keys),
+                                                               options: .skipsHiddenFiles)
+        var backups = [LocalBackupFile]()
+        for url in urls where url.pathExtension.lowercased() == "zip" {
+            let metadata = try url.resourceValues(forKeys: keys)
+            guard metadata.isRegularFile == true, metadata.isSymbolicLink != true else { continue }
+            backups.append(LocalBackupFile(url: url, date: metadata.contentModificationDate ?? .distantPast,
+                                          size: metadata.fileSize.map(Int64.init)))
+        }
+        return backups.sorted { $0.date == $1.date ? $0.name > $1.name : $0.date > $1.date }
     }
 
     nonisolated static func saveLocal(_ archive: URL, directory: URL) throws {

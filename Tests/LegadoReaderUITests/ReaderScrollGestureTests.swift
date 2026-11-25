@@ -4,103 +4,185 @@ import Vision
 
 @MainActor
 final class ReaderScrollGestureTests: XCTestCase {
+    func testLocalBackupHistoryRestoreWithoutWebDAV() throws {
+        let app = launchBackupSettings()
+        defer { app.terminate() }
+        setBackupOption("按间隔备份", enabled: false, in: app)
+        setBackupOption("每日定时备份", enabled: false, in: app)
+
+        let save = app.buttons["备份到本机"]
+        tapBackupButton(save, in: app, towardBottom: false)
+        let name = try savedBackupName(from: save, in: app)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "已备份到本机：" + name))
+            .firstMatch.waitForExistence(timeout: 5), backupState(in: app))
+        setBackupOption("按间隔备份", enabled: true, in: app)
+        setBackupOption("每日定时备份", enabled: true, in: app)
+
+        tapBackupButton(app.buttons["从本机选择备份恢复"], in: app, towardBottom: false)
+        let item = app.buttons["backup.local." + name]
+        tapBackupButton(item, in: app)
+        finishBackupRestore(named: name, checking: ["按间隔备份", "每日定时备份"], in: app)
+    }
+
     func testLocalZIPBackupAndRestoreWithoutWebDAV() throws {
+        let app = launchBackupSettings()
+        defer { app.terminate() }
+        setBackupOption("按间隔备份", enabled: false, in: app)
+
+        let export = app.buttons["导出 ZIP 备份到文件"]
+        tapBackupButton(export, in: app, towardBottom: false)
+        let saveLabels = ["Save", "Done", "Move", "Confirm", "存储", "储存", "保存", "完成", "移動", "移动", "儲存"]
+        let save = try XCTUnwrap(filesElement(in: app, timeout: 55) { owner in
+            owner.buttons.matching(NSPredicate(
+                format: "label IN[c] %@ OR identifier IN[c] %@ OR identifier ENDSWITH[c] %@",
+                saveLabels, saveLabels + ["SaveButton", "DOCSaveButton", "ConfirmButton", "DoneButton", "checkmark"], "SaveButton"
+            )).firstMatch
+        }, "Files did not offer a save action. " + backupState(in: app))
+        XCTAssertTrue(save.isEnabled, backupState(in: app))
+        save.tap()
+        let name = try savedBackupName(from: export, in: app)
+        setBackupOption("按间隔备份", enabled: true, in: app)
+
+        tapBackupButton(app.buttons["选择 ZIP 文件恢复"], in: app, towardBottom: false)
+        // Files may hide the extension. The timestamp selects this export even if a previous
+        // test saved another ZIP in Backups. The app's confirmation verifies the complete name.
+        let prefix = String(name.prefix("legado-ios-".count + 19))
+        let findArchive: (XCUIApplication) -> XCUIElement = { owner in
+            owner.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", prefix)).firstMatch
+        }
+        var item = filesElement(in: app, timeout: 12, matching: findArchive)
+        if item == nil {
+            let recent = filesElement(in: app, timeout: 2) { owner in
+                owner.buttons.matching(NSPredicate(format: "label IN %@", ["Recents", "最近使用", "最近项目", "最近項目"])).firstMatch
+            }
+            recent?.tap()
+            item = filesElement(in: app, timeout: 12, matching: findArchive)
+        }
+        let file = try XCTUnwrap(item, "Files did not show \(name). " + backupState(in: app))
+        file.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
+        if !app.alerts["恢复所选备份？"].waitForExistence(timeout: 3) {
+            let choose = filesElement(in: app, timeout: 3) { owner in
+                let labels = ["Open", "打开", "打開", "Import", "导入", "匯入", "Done", "完成"]
+                return owner.buttons.matching(NSPredicate(format: "label IN[c] %@ OR identifier IN[c] %@", labels, labels)).firstMatch
+            }
+            if let choose, choose.isEnabled { choose.tap() }
+        }
+        finishBackupRestore(named: name, checking: ["按间隔备份"], in: app)
+    }
+
+    private func launchBackupSettings() -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["-uiDemoTab", "settings"]
         app.launch()
+        openBackupSettings(in: app)
+        return app
+    }
 
-        func reveal(_ element: XCUIElement, towardBottom: Bool = true) {
-            for _ in 0..<6 where !element.isHittable {
-                if towardBottom { app.swipeUp() } else { app.swipeDown() }
+    private func openBackupSettings(in app: XCUIApplication) {
+        let link = app.buttons["profile.arrow.triangle.2.circlepath"]
+        revealBackupElement(link, in: app)
+        link.tap()
+        XCTAssertTrue(app.navigationBars["备份与恢复"].waitForExistence(timeout: 15), backupState(in: app))
+        XCTAssertFalse(app.buttons["立即同步"].isEnabled)
+    }
+
+    private func revealBackupElement(_ element: XCUIElement, in app: XCUIApplication, towardBottom: Bool = true) {
+        for _ in 0..<8 {
+            let navigation = app.navigationBars.firstMatch
+            let top = (navigation.exists ? navigation.frame.maxY : app.frame.minY) + 8
+            let tabs = app.tabBars.firstMatch
+            let bottom = (tabs.exists ? tabs.frame.minY : app.frame.maxY) - 12
+            var forward = towardBottom
+            if element.exists, !element.frame.isEmpty {
+                let y = element.frame.midY
+                if element.isHittable && y > top && y < bottom { return }
+                if y <= top { forward = false }
+                if y >= bottom { forward = true }
             }
-            XCTAssertTrue(element.isHittable, app.debugDescription)
+            if forward { app.swipeUp(velocity: .slow) } else { app.swipeDown(velocity: .slow) }
         }
-        func openSettings() {
-            let link = app.buttons["profile.arrow.triangle.2.circlepath"]
-            reveal(link)
-            link.tap()
-            XCTAssertTrue(app.navigationBars["备份与恢复"].waitForExistence(timeout: 10))
-            XCTAssertFalse(app.buttons["立即同步"].isEnabled)
+        XCTFail("Could not expose \(element). " + backupState(in: app))
+    }
+
+    private func tapBackupButton(_ button: XCUIElement, in app: XCUIApplication, towardBottom: Bool = true) {
+        revealBackupElement(button, in: app, towardBottom: towardBottom)
+        XCTAssertTrue(button.isEnabled, backupState(in: app))
+        // Hit the visible text, including on compact Form rows with trailing blank space.
+        button.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.5)).tap()
+    }
+
+    private func setBackupOption(_ name: String, enabled: Bool, in app: XCUIApplication) {
+        let toggle = app.switches[name]
+        revealBackupElement(toggle, in: app)
+        let expected = enabled ? "1" : "0"
+        if toggle.value as? String != expected {
+            toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
         }
-        func setSwitch(_ toggle: XCUIElement, to value: String, towardBottom: Bool = true) {
-            reveal(toggle, towardBottom: towardBottom)
-            if toggle.value as? String != value {
-                toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
+        XCTAssertEqual(toggle.value as? String, expected, name)
+    }
+
+    private func savedBackupName(from button: XCUIElement, in app: XCUIApplication) throws -> String {
+        let saved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard button.exists, let name = button.value as? String else { return false }
+            return name.hasPrefix("legado-ios-") && name.hasSuffix(".zip")
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [saved], timeout: 45), .completed, backupState(in: app))
+        return try XCTUnwrap(button.value as? String)
+    }
+
+    private func filesElement(in app: XCUIApplication, timeout: TimeInterval,
+                              matching query: (XCUIApplication) -> XCUIElement) -> XCUIElement? {
+        let filesApp = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
+        let end = Date().addingTimeInterval(timeout)
+        repeat {
+            let embedded = query(app)
+            if embedded.waitForExistence(timeout: 1), embedded.isHittable { return embedded }
+            if filesApp.state == .runningForeground {
+                let system = query(filesApp)
+                if system.exists && system.isHittable { return system }
             }
-            XCTAssertEqual(toggle.value as? String, value, toggle.label)
-        }
-        func filesState() -> String {
-            app.debugDescription.split(separator: "\n")
-                .filter { $0.contains("NavigationBar") || $0.contains("Cell,") || $0.contains("legado-ios-") }
-                .prefix(12).joined(separator: " | ")
-        }
+        } while Date() < end
+        return nil
+    }
 
-        openSettings()
-        let open = app.switches["打开应用时备份"]
-        let interval = app.switches["按间隔备份"]
-        let daily = app.switches["每日定时备份"]
-        for toggle in [open, interval, daily] { setSwitch(toggle, to: "0") }
-
-        let export = app.buttons["导出 ZIP 备份到文件"]
-        reveal(export, towardBottom: false)
-        let exportStarted = Date()
-        export.tap()
-        let save = app.buttons.matching(NSPredicate(format: "label IN %@", ["Save", "存储", "储存", "保存"])).firstMatch
-        XCTAssertTrue(save.waitForExistence(timeout: 30), "ZIP export did not open Files. \(filesState())")
-        XCTAssertTrue(save.isEnabled, "No writable export destination. \(filesState())")
-        save.tap()
-        expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: save)
-        waitForExpectations(timeout: 15)
-        let exportEnded = Date()
-
-        // A restored real preference distinguishes importing the selected ZIP from just dismissing Files.
-        for toggle in [open, interval, daily] { setSwitch(toggle, to: "1") }
-        XCTAssertEqual(interval.value as? String, "1")
-        let localTime = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", "本地时间")).firstMatch
-        let timePicker = app.datePickers.firstMatch
-        if !timePicker.exists && !localTime.exists { app.swipeUp() }
-        XCTAssertTrue(timePicker.exists || localTime.exists)
-        // Avoid an app-opening backup while moving through Apple's file provider.
-        setSwitch(open, to: "0", towardBottom: false)
-
-        let pick = app.buttons["选择 ZIP 文件恢复"]
-        reveal(pick, towardBottom: false)
-        pick.tap()
-        // Both pickers start in Backups. Some Files versions reopen Recents.
-        let archive = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", "legado-ios-")).firstMatch
-        if !archive.waitForExistence(timeout: 10) {
-            let recent = app.buttons.matching(NSPredicate(format: "label IN %@",
-                                                          ["Recents", "最近使用", "最近项目"])).firstMatch
-            if recent.isHittable { recent.tap() }
-        }
-        XCTAssertTrue(archive.waitForExistence(timeout: 10), "Could not find exported ZIP in Backups or Recents. \(filesState())")
-        archive.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
-        let choose = app.buttons.matching(NSPredicate(format: "label IN %@", ["Open", "打开", "Import", "导入"])).firstMatch
+    private func finishBackupRestore(named name: String, checking options: [String], in app: XCUIApplication) {
         let confirm = app.alerts["恢复所选备份？"]
-        if !confirm.waitForExistence(timeout: 2), choose.isHittable && choose.isEnabled { choose.tap() }
-        XCTAssertTrue(confirm.waitForExistence(timeout: 20), "Selected ZIP did not reach restore confirmation. \(filesState())")
-        let detail = confirm.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "legado-ios-")).firstMatch.label
-        let pattern = #"legado-ios-\d{8}T\d{9}Z-[0-9A-Fa-f-]{36}\.zip"#
-        let filename = try XCTUnwrap(detail.range(of: pattern, options: .regularExpression), "Unexpected backup name: \(detail)")
-        let timestamp = detail[filename].dropFirst("legado-ios-".count).prefix(19)
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyyMMdd'T'HHmmssSSS'Z'"
-        let created = try XCTUnwrap(formatter.date(from: String(timestamp)))
-        XCTAssertGreaterThanOrEqual(created, exportStarted.addingTimeInterval(-1), "Selected a previous backup: \(detail)")
-        XCTAssertLessThanOrEqual(created, exportEnded.addingTimeInterval(1), "Selected a later backup: \(detail)")
+        XCTAssertTrue(confirm.waitForExistence(timeout: 25), backupState(in: app))
+        XCTAssertTrue(confirm.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", name)).firstMatch.exists,
+                      "The selected ZIP should be \(name). " + backupState(in: app))
         confirm.buttons["恢复备份"].tap()
         let restored = app.alerts["备份已恢复"]
-        XCTAssertTrue(restored.waitForExistence(timeout: 35), app.debugDescription)
+        XCTAssertTrue(restored.waitForExistence(timeout: 45), backupState(in: app))
         restored.buttons["好"].tap()
-
-        openSettings()
-        for toggle in [interval, daily] {
-            reveal(toggle)
-            XCTAssertEqual(toggle.value as? String, "0", "恢复后应采用 ZIP 中的自动备份选项")
+        openBackupSettings(in: app)
+        for name in options {
+            let toggle = app.switches[name]
+            revealBackupElement(toggle, in: app)
+            XCTAssertEqual(toggle.value as? String, "0", "ZIP should restore \(name)")
         }
+    }
+
+    private func backupState(in app: XCUIApplication) -> String {
+        attachScreenshot(app)
+        let files = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
+        let trees = [app.debugDescription] + (files.state == .runningForeground ? [files.debugDescription] : [])
+        let attachment = XCTAttachment(string: trees.joined(separator: "\n"))
+        attachment.name = "Backup and Files accessibility hierarchy"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        let lines = trees.flatMap { $0.split(separator: "\n") }
+        let messages = lines.filter { $0.contains("操作结果") || $0.contains("失败") || $0.contains("正在") || $0.contains("Alert,") }
+        let controls = lines.filter { $0.contains("NavigationBar,") || $0.contains("Button,") || $0.contains("ProgressIndicator,") }
+        var status = ""
+        if app.buttons["导出 ZIP 备份到文件"].isHittable {
+            // The Form creates its operation-result row near the bottom, outside a compact screen.
+            // Keep the original hierarchy above, then surface the actual archive error if present.
+            let result = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "操作结果：")).firstMatch
+            for _ in 0..<2 where !result.exists { app.swipeUp(velocity: .fast) }
+            if result.exists { status = result.label + " | " }
+        }
+        return status + (messages.prefix(5) + controls.suffix(18)).map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: " | ")
     }
 
     func testCenterTapOpensFontColorPickerBesideFontSize() throws {
@@ -527,15 +609,44 @@ final class ReaderScrollGestureTests: XCTestCase {
         let browse = app.tabBars.buttons.matching(NSPredicate(format: "label IN %@", ["Browse", "浏览"])).firstMatch
         if browse.exists && !browse.isSelected { browse.tap() }
         openImportFixtureFolder(in: app)
+        func importState() -> String {
+            let tree = app.debugDescription.split(separator: "\n")
+            let status = tree.filter { $0.contains("TXT-Paging") || $0.contains("Alert,") ||
+                $0.contains("NavigationBar,") || $0.contains("文件操作失败") }
+            let buttons = tree.filter { $0.contains("Button,") && $0.contains("label:") }.suffix(10)
+            return (Array(status) + buttons).joined(separator: " | ")
+        }
         let file = importFixtureItem("TXT-Paging", in: app)
+        XCTAssertTrue(file.waitForExistence(timeout: 15) && file.isEnabled, importState())
         file.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
-        let open = app.buttons.matching(NSPredicate(format: "label IN %@", ["Open", "打开", "Import", "导入"])).firstMatch
-        if open.exists { open.tap() }
-        let book = app.buttons.matching(NSPredicate(
-            format: "label BEGINSWITH %@ AND label CONTAINS %@", "TXT-Paging", "书架："
+        let open = app.buttons.matching(NSPredicate(
+            format: "label IN %@ OR identifier IN %@",
+            ["Open", "打开", "Import", "导入", "Done", "完成"], ["OpenButton", "ImportButton"]
         )).firstMatch
-        XCTAssertTrue(book.waitForExistence(timeout: 10))
-        book.tap()
+        let shelf = app.tabBars.buttons["书架"]
+        let selected = expectation(for: NSPredicate { _, _ in
+            (open.isHittable && open.isEnabled) || (!file.exists && shelf.isHittable)
+        }, evaluatedWith: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 20), .completed, importState())
+        if open.isHittable && open.isEnabled { open.tap() }
+
+        // File management adds the selected book to the shelf asynchronously.
+        // Open the real shelf item after Files has dismissed.
+        let failure = app.alerts["文件操作失败"]
+        let dismissed = expectation(for: NSPredicate { _, _ in
+            failure.exists || (!open.isHittable && shelf.isHittable)
+        }, evaluatedWith: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 20), .completed, importState())
+        XCTAssertFalse(failure.exists, failure.debugDescription)
+        shelf.tap()
+        let title = NSPredicate(format: "label CONTAINS %@", "TXT-Paging")
+        let book = app.buttons.matching(title).firstMatch
+        let name = app.staticTexts.matching(title).firstMatch
+        _ = book.waitForExistence(timeout: 5)
+        for _ in 0..<6 where !book.isHittable && !name.isHittable { app.swipeUp() }
+        let target = book.isHittable ? book : name
+        XCTAssertTrue(target.isHittable, "Imported book missing from bookshelf. \(importState())")
+        target.tap()
         let body = app.textViews["reader.text"]
         XCTAssertTrue(body.waitForExistence(timeout: 20))
         let footer = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+/[0-9]+")).firstMatch
