@@ -252,14 +252,24 @@ struct ReadingImportPicker: UIViewControllerRepresentable {
     let contentTypes: [UTType]
     let allowsMultipleSelection: Bool
     var directoryURL: URL? = nil
-    var asCopy = true
     let onPick: @MainActor ([URL]) -> Void
     let onCancel: @MainActor () -> Void
+
+    static func backup(directoryURL: URL?,
+                       onPick: @escaping @MainActor (SourceImportFile) -> Void,
+                       onCancel: @escaping @MainActor () -> Void) -> Self {
+        // File providers can advertise a ZIP as generic data or only support
+        // handing out a copy. The importer checks the actual backup manifest.
+        Self(contentTypes: [.item], allowsMultipleSelection: false, directoryURL: directoryURL, onPick: { urls in
+            guard let url = urls.first else { onCancel(); return }
+            onPick(SourceImportFile(url: url))
+        }, onCancel: onCancel)
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: contentTypes, asCopy: asCopy)
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: contentTypes, asCopy: true)
         picker.directoryURL = directoryURL
         picker.allowsMultipleSelection = allowsMultipleSelection
         picker.shouldShowFileExtensions = true

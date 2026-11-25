@@ -10,17 +10,15 @@ final class ReaderScrollGestureTests: XCTestCase {
         setBackupOption("按间隔备份", enabled: false, in: app)
         setBackupOption("每日定时备份", enabled: false, in: app)
 
-        let save = app.buttons["备份到本机"]
-        tapBackupButton(save, in: app, towardBottom: false)
-        let name = try savedBackupName(from: save, in: app)
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "已备份到本机：" + name))
-            .firstMatch.waitForExistence(timeout: 5), backupState(in: app))
+        let name = try createLocalBackup(in: app)
         setBackupOption("按间隔备份", enabled: true, in: app)
         setBackupOption("每日定时备份", enabled: true, in: app)
 
         tapBackupButton(app.buttons["从本机选择备份恢复"], in: app, towardBottom: false)
+        XCTAssertTrue(app.navigationBars["本机备份"].waitForExistence(timeout: 10), backupState(in: app))
         let item = app.buttons["backup.local." + name]
-        tapBackupButton(item, in: app)
+        XCTAssertTrue(item.waitForExistence(timeout: 10) && item.isHittable, backupState(in: app))
+        item.tap()
         finishBackupRestore(named: name, checking: ["按间隔备份", "每日定时备份"], in: app)
     }
 
@@ -29,36 +27,27 @@ final class ReaderScrollGestureTests: XCTestCase {
         defer { app.terminate() }
         setBackupOption("按间隔备份", enabled: false, in: app)
 
-        let export = app.buttons["导出 ZIP 备份到文件"]
-        tapBackupButton(export, in: app, towardBottom: false)
-        let saveLabels = ["Save", "Done", "Move", "Confirm", "存储", "储存", "保存", "完成", "移動", "移动", "儲存"]
-        let save = try XCTUnwrap(filesElement(in: app, timeout: 55) { owner in
-            owner.buttons.matching(NSPredicate(
-                format: "label IN[c] %@ OR identifier IN[c] %@ OR identifier ENDSWITH[c] %@",
-                saveLabels, saveLabels + ["SaveButton", "DOCSaveButton", "ConfirmButton", "DoneButton", "checkmark"], "SaveButton"
-            )).firstMatch
-        }, "Files did not offer a save action. " + backupState(in: app))
-        XCTAssertTrue(save.isEnabled, backupState(in: app))
-        save.tap()
-        let name = try savedBackupName(from: export, in: app)
+        let name = try createLocalBackup(in: app)
         setBackupOption("按间隔备份", enabled: true, in: app)
 
-        tapBackupButton(app.buttons["选择 ZIP 文件恢复"], in: app, towardBottom: false)
-        // Files may hide the extension. The timestamp selects this export even if a previous
-        // test saved another ZIP in Backups. The app's confirmation verifies the complete name.
-        let prefix = String(name.prefix("legado-ios-".count + 19))
-        let findArchive: (XCUIApplication) -> XCUIElement = { owner in
-            owner.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", prefix)).firstMatch
-        }
-        var item = filesElement(in: app, timeout: 12, matching: findArchive)
-        if item == nil {
-            let recent = filesElement(in: app, timeout: 2) { owner in
-                owner.buttons.matching(NSPredicate(format: "label IN %@", ["Recents", "最近使用", "最近项目", "最近項目"])).firstMatch
-            }
-            recent?.tap()
-            item = filesElement(in: app, timeout: 12, matching: findArchive)
-        }
-        let file = try XCTUnwrap(item, "Files did not show \(name). " + backupState(in: app))
+        let pick = app.buttons["选择 ZIP 文件恢复"]
+        tapBackupButton(pick, in: app, towardBottom: false)
+        let cancelLabels = ["Cancel", "Close", "Dismiss", "取消", "关闭", "關閉"]
+        let cancel = try XCTUnwrap(filesElement(in: app, timeout: 45) { owner in
+            owner.buttons.matching(NSPredicate(format: "label IN[c] %@ OR identifier IN[c] %@",
+                                               cancelLabels, cancelLabels + ["CancelButton", "CloseButton", "xmark"])).firstMatch
+        }, "Files did not present a cancellable picker. " + backupState(in: app))
+        cancel.tap()
+        let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            pick.isHittable && !cancel.isHittable
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 15), .completed, backupState(in: app))
+        XCTAssertFalse(app.alerts["恢复所选备份？"].exists)
+        tapBackupButton(pick, in: app, towardBottom: false)
+
+        let file = try XCTUnwrap(backupInFiles(named: name, in: app),
+                                 "Files did not show the local ZIP " + name + ". " + backupState(in: app))
+        XCTAssertTrue(file.isEnabled, "The ZIP is disabled in Files. " + backupState(in: app))
         file.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
         if !app.alerts["恢复所选备份？"].waitForExistence(timeout: 3) {
             let choose = filesElement(in: app, timeout: 3) { owner in
@@ -122,13 +111,39 @@ final class ReaderScrollGestureTests: XCTestCase {
         XCTAssertEqual(toggle.value as? String, expected, name)
     }
 
-    private func savedBackupName(from button: XCUIElement, in app: XCUIApplication) throws -> String {
+    private func createLocalBackup(in app: XCUIApplication) throws -> String {
+        let save = app.buttons["备份到本机"]
+        tapBackupButton(save, in: app, towardBottom: false)
         let saved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            guard button.exists, let name = button.value as? String else { return false }
+            guard save.exists, let name = save.value as? String else { return false }
             return name.hasPrefix("legado-ios-") && name.hasSuffix(".zip")
         }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [saved], timeout: 45), .completed, backupState(in: app))
-        return try XCTUnwrap(button.value as? String)
+        return try XCTUnwrap(save.value as? String)
+    }
+
+    private func backupInFiles(named name: String, in app: XCUIApplication) -> XCUIElement? {
+        // The provider may shorten long names or hide their extension. The confirmation uses the full name.
+        let prefix = String(name.prefix("legado-ios-".count + 19))
+        func row(_ owner: XCUIApplication, prefixes: [String]) -> XCUIElement {
+            let names = prefixes.map { NSPredicate(format: "label BEGINSWITH %@", $0) }
+            let matches = NSCompoundPredicate(orPredicateWithSubpredicates: names)
+            let cell = owner.cells.matching(matches).firstMatch
+            if cell.exists { return cell }
+            return owner.collectionViews.descendants(matching: .any).matching(matches).firstMatch
+        }
+        let archive: (XCUIApplication) -> XCUIElement = { row($0, prefixes: [prefix]) }
+        if let file = filesElement(in: app, timeout: 10, matching: archive) { return file }
+
+        // The initial directory is a provider hint. Files may reopen in Recents or at Locations.
+        let browseLabels = ["Browse", "Locations", "浏览", "瀏覽", "位置"]
+        if let browse = filesElement(in: app, timeout: 2, matching: { owner in
+            owner.buttons.matching(NSPredicate(format: "label IN %@", browseLabels)).firstMatch
+        }) { browse.tap() }
+        for folders in [["On My iPhone", "我的 iPhone", "我的iPhone"], ["小浣熊阅读", "Legado"], ["Backups"]] {
+            if let folder = filesElement(in: app, timeout: 3, matching: { row($0, prefixes: folders) }) { folder.tap() }
+        }
+        return filesElement(in: app, timeout: 12, matching: archive)
     }
 
     private func filesElement(in app: XCUIApplication, timeout: TimeInterval,
@@ -174,15 +189,7 @@ final class ReaderScrollGestureTests: XCTestCase {
         let lines = trees.flatMap { $0.split(separator: "\n") }
         let messages = lines.filter { $0.contains("操作结果") || $0.contains("失败") || $0.contains("正在") || $0.contains("Alert,") }
         let controls = lines.filter { $0.contains("NavigationBar,") || $0.contains("Button,") || $0.contains("ProgressIndicator,") }
-        var status = ""
-        if app.buttons["导出 ZIP 备份到文件"].isHittable {
-            // The Form creates its operation-result row near the bottom, outside a compact screen.
-            // Keep the original hierarchy above, then surface the actual archive error if present.
-            let result = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "操作结果：")).firstMatch
-            for _ in 0..<2 where !result.exists { app.swipeUp(velocity: .fast) }
-            if result.exists { status = result.label + " | " }
-        }
-        return status + (messages.prefix(5) + controls.suffix(18)).map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: " | ")
+        return (messages.prefix(5) + controls.suffix(18)).map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: " | ")
     }
 
     func testCenterTapOpensFontColorPickerBesideFontSize() throws {
@@ -953,5 +960,37 @@ final class ReaderScrollGestureTests: XCTestCase {
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+}
+
+extension ReaderScrollGestureTests {
+    @objc func testWebDAVSyncShowsUploadedZIPInRemoteHistory() throws {
+        let port = try XCTUnwrap(ProcessInfo.processInfo.environment["LEGADO_TEST_DAV_PORT"],
+                                 "Start the loopback WebDAV fixture before running this test.")
+        let app = launchBackupSettings()
+        defer { app.terminate() }
+        let field = app.textFields["WebDAV 目录地址"]
+        let directory = "http://127.0.0.1:\(port)/dav/ui-\(UUID().uuidString.prefix(12))/backups"
+        revealBackupElement(field, in: app, towardBottom: false)
+        field.tap()
+        field.typeText(directory + "\n")
+        XCTAssertEqual(field.value as? String, directory)
+        tapBackupButton(app.buttons["立即同步"], in: app)
+
+        let prefix = "已上传备份："
+        let receipt = app.staticTexts.matching(NSPredicate(
+            format: "identifier == %@ AND label BEGINSWITH %@ AND label ENDSWITH[c] %@",
+            "backup.status", prefix, ".zip"
+        )).firstMatch
+        XCTAssertTrue(receipt.waitForExistence(timeout: 45), backupState(in: app))
+        XCTAssertTrue(receipt.isHittable, "The upload result should be visible without scrolling.")
+        let filename = String(receipt.label.dropFirst(prefix.count))
+        XCTAssertTrue(filename.hasPrefix("legado-ios-"), filename)
+
+        tapBackupButton(app.buttons["从 WebDAV 选择备份恢复"], in: app)
+        XCTAssertTrue(app.navigationBars["云端备份"].waitForExistence(timeout: 15), backupState(in: app))
+        let file = app.buttons["backup.remote." + filename]
+        XCTAssertTrue(file.waitForExistence(timeout: 10) && file.isHittable, backupState(in: app))
+        XCTAssertEqual(file.label, filename)
     }
 }

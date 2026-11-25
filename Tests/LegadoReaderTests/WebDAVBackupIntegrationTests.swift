@@ -44,7 +44,12 @@ final class WebDAVBackupIntegrationTests: XCTestCase {
         XCTAssertTrue(previouslyEmpty.isEmpty)
         var refreshes = 0
         service.didRestore = { refreshes += 1 }
-        try await service.restore(from: saved, database: fresh)
+        let providerURL = local.appendingPathComponent("provider-document.data")
+        try files.moveItem(at: saved, to: providerURL)
+        let selected = try TemporaryBackup.importCopy(of: SourceImportFile(url: providerURL))
+        XCTAssertEqual(selected.name, providerURL.lastPathComponent)
+        try await service.restore(from: selected.url, database: fresh)
+        XCTAssertTrue(files.fileExists(atPath: providerURL.path))
         let restoredShelf = try await fresh.loadBooks()
         let restored = try XCTUnwrap(restoredShelf.first)
         let restoredURL = try XCTUnwrap(URL(string: restored.bookUrl))
@@ -69,7 +74,7 @@ final class WebDAVBackupIntegrationTests: XCTestCase {
         let otherBook = Book(bookUrl: "https://example.org/b", name: "另一台设备", author: "")
 
         try await database.replaceBooks([firstBook])
-        guard case .uploaded = try await service.sync(database: database, account: account) else {
+        guard case .uploaded(let uploaded) = try await service.sync(database: database, account: account) else {
             return XCTFail("立即同步应创建目录并上传首份完整 ZIP")
         }
         guard case .unchanged = try await service.sync(database: database, account: account) else {
@@ -77,6 +82,7 @@ final class WebDAVBackupIntegrationTests: XCTestCase {
         }
         let firstList = try await client.listBackups()
         let first = try XCTUnwrap(firstList.first)
+        XCTAssertEqual(first.name, uploaded.name)
 
         try await other.replaceBooks([otherBook])
         let upload = try await service.createArchive(database: other)
@@ -109,6 +115,7 @@ final class WebDAVBackupIntegrationTests: XCTestCase {
         try await db.replaceBooks([Book(bookUrl: "https://example.com/current", name: "现有书架", author: "")])
         let broken = work.appendingPathComponent("incomplete.zip")
         try Data([80, 75, 3, 4, 0]).write(to: broken)
+        XCTAssertThrowsError(try TemporaryBackup.importCopy(of: SourceImportFile(url: broken)))
         do {
             try await WebDAVBackupService().restore(from: broken, database: db)
             XCTFail("应拒绝无效备份")

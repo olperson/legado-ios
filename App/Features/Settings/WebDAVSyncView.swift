@@ -12,16 +12,28 @@ struct WebDAVSyncView: View {
     @State private var loadedAccount = false
     @State private var work: String?
     @State private var message: String?
-    @State private var history: [WebDAVBackupFile]?
-    @State private var localHistory: [LocalBackupFile]?
     @State private var lastLocalBackup: URL?
-    @State private var picksFile = false
-    @State private var pickedFile: SourceImportFile?
-    @State private var pickerHasDismissed = false
+    @State private var sheet: BackupSheet?
+    @State private var sheetHasDismissed = true
+    @State private var selection: Selection?
     @State private var importCopy: Task<TemporaryBackup, Error>?
-    @State private var exportedFile: TemporaryBackup?
-    @State private var lastExportName: String?
     @State private var review: Review?
+
+    private enum BackupSheet: Identifiable {
+        case local([LocalBackupFile]), remote([WebDAVBackupFile]), file
+
+        var id: String {
+            switch self {
+            case .local: "local"
+            case .remote: "remote"
+            case .file: "file"
+            }
+        }
+    }
+
+    private enum Selection {
+        case backup(Review), file(SourceImportFile)
+    }
 
     private enum Review {
         case local(TemporaryBackup)
@@ -61,26 +73,26 @@ struct WebDAVSyncView: View {
     var body: some View {
         Form {
             connectionSection
-            if let history { historySection(history) }
             localSection
-            if let localHistory {
-                Section("本机备份（最新在前）") {
-                    if localHistory.isEmpty { Text("这个目录还没有备份。").foregroundStyle(.secondary) }
-                    ForEach(localHistory) { file in
-                        Button { review = .onDevice(file) } label: {
-                            backupLabel(name: file.name, date: file.date, size: file.size)
-                        }
-                        .accessibilityLabel(file.name)
-                        .accessibilityValue(file.date.formatted(date: .abbreviated, time: .standard))
-                        .accessibilityIdentifier("backup.local." + file.name)
-                    }
-                }
-                .disabled(work != nil)
-            }
             WebDAVAutoBackupSection()
-                .disabled(work != nil)
-            if let work { ProgressView(work) }
-            if let message { Text(message).accessibilityLabel("操作结果：\(message)") }
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let work {
+                HStack {
+                    ProgressView()
+                    Text(work)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal).padding(.vertical, 8)
+                .background(.bar)
+            } else if let message {
+                Text(message)
+                    .accessibilityIdentifier("backup.status")
+                    .font(.callout)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal).padding(.vertical, 8)
+                    .background(.bar)
+            }
         }
         .navigationTitle("备份与恢复")
         .navigationBarTitleDisplayMode(.inline)
@@ -90,26 +102,20 @@ struct WebDAVSyncView: View {
             do { account = try WebDAVAccount.load() ?? WebDAVAccount() }
             catch { message = error.localizedDescription }
         }
-        .onChange(of: account) { _ in history = nil }
         .onDisappear { importCopy?.cancel() }
-        .sheet(isPresented: $picksFile, onDismiss: {
-            pickerHasDismissed = true
-            readPickedBackupWhenReady()
-        }) {
-            ReadingImportPicker(contentTypes: [.zip], allowsMultipleSelection: false,
-                                directoryURL: try? WebDAVBackupService.localBackupDirectory(), asCopy: false) { urls in
-                pickedFile = urls.first.map { SourceImportFile(url: $0) }
-                picksFile = false
-                readPickedBackupWhenReady()
-            } onCancel: {
-                pickedFile = nil
-                picksFile = false
-            }
-        }
-        .sheet(item: $exportedFile) { file in
-            FileExportPicker(url: file.url, directoryURL: try? WebDAVBackupService.localBackupDirectory()) { saved in
-                exportedFile = nil
-                lastExportName = saved?.lastPathComponent
+        .sheet(item: $sheet, onDismiss: {
+            sheetHasDismissed = true
+            handleSelectionWhenReady()
+        }) { presented in
+            switch presented {
+            case .file:
+                ReadingImportPicker.backup(directoryURL: try? WebDAVBackupService.localBackupDirectory()) { file in
+                    select(.file(file))
+                } onCancel: {
+                    select(nil)
+                }
+            case .local, .remote:
+                historyView(presented)
             }
         }
         .alert(review?.title ?? "恢复备份", isPresented: Binding(
@@ -167,7 +173,8 @@ struct WebDAVSyncView: View {
                 }
                 Button("从 WebDAV 选择备份恢复") {
                     perform("正在读取备份列表…") {
-                        history = try await savedClient().listBackups(includeOtherArchives: true)
+                        let files = try await savedClient().listBackups(includeOtherArchives: true)
+                        present(.remote(files))
                     }
                 }
             }
@@ -186,7 +193,6 @@ struct WebDAVSyncView: View {
                 perform("正在备份到本机…") {
                     lastLocalBackup = nil
                     lastLocalBackup = try await WebDAVBackupService.shared.backUpLocally(database: database())
-                    if localHistory != nil { localHistory = try await WebDAVBackupService.localBackups() }
                 }
             }
             .accessibilityValue(lastLocalBackup?.lastPathComponent ?? "")
@@ -195,24 +201,11 @@ struct WebDAVSyncView: View {
             }
             Button("从本机选择备份恢复") {
                 perform("正在读取本机备份…") {
-                    localHistory = try await WebDAVBackupService.localBackups()
+                    let files = try await WebDAVBackupService.localBackups()
+                    present(.local(files))
                 }
             }
-            Button("导出 ZIP 备份到文件") {
-                perform("正在生成 ZIP…") {
-                    lastExportName = nil
-                    let url = try await WebDAVBackupService.shared.createArchive(database: database())
-                    exportedFile = TemporaryBackup(url: url, name: url.lastPathComponent)
-                }
-            }
-            .accessibilityValue(lastExportName ?? "")
-            if let lastExportName {
-                Text("已导出 ZIP 备份：\(lastExportName)").font(.footnote)
-            }
-            Button("选择 ZIP 文件恢复") {
-                pickerHasDismissed = false
-                picksFile = true
-            }
+            Button("选择 ZIP 文件恢复") { present(.file) }
         } header: {
             Text("本地备份")
         } footer: {
@@ -221,34 +214,72 @@ struct WebDAVSyncView: View {
         .disabled(work != nil)
     }
 
-    private func readPickedBackupWhenReady() {
-        guard pickerHasDismissed, let file = pickedFile else { return }
-        pickedFile = nil
-        perform("正在读取 ZIP…") {
-            let task = Task.detached(priority: .userInitiated) { try TemporaryBackup.importCopy(of: file) }
-            importCopy = task
-            defer { importCopy = nil }
-            let copy = try await task.value
-            if !task.isCancelled { review = .local(copy) }
+    private func present(_ next: BackupSheet) {
+        selection = nil
+        sheetHasDismissed = false
+        sheet = next
+    }
+
+    private func select(_ next: Selection?) {
+        selection = next
+        sheet = nil
+        handleSelectionWhenReady()
+    }
+
+    // The system picker can deliver its URL just before or just after dismissing.
+    private func handleSelectionWhenReady() {
+        guard sheetHasDismissed, let selected = selection else { return }
+        selection = nil
+        switch selected {
+        case .backup(let chosen):
+            review = chosen
+        case .file(let file):
+            perform("正在读取 ZIP…") {
+                let task = Task.detached(priority: .userInitiated) { try TemporaryBackup.importCopy(of: file) }
+                importCopy = task
+                defer { importCopy = nil }
+                let copy = try await task.value
+                if !task.isCancelled { review = .local(copy) }
+            }
         }
     }
 
-    private func historySection(_ files: [WebDAVBackupFile]) -> some View {
-        Section {
-            if files.isEmpty {
-                Text("这个目录还没有备份。").foregroundStyle(.secondary)
-            }
-            ForEach(files) { file in
-                Button {
-                    review = .remote(file)
-                } label: {
-                    backupLabel(name: file.name, date: file.date, size: file.size, legacy: file.isLegacySnapshot)
+    private func historyView(_ presented: BackupSheet) -> some View {
+        ReadingNavigationStack {
+            List {
+                switch presented {
+                case .local(let files):
+                    if files.isEmpty { Text("本机还没有备份。").foregroundStyle(.secondary) }
+                    ForEach(files) { file in
+                        Button { select(.backup(.onDevice(file))) } label: {
+                            backupLabel(name: file.name, date: file.date, size: file.size)
+                        }
+                        .accessibilityLabel(file.name)
+                        .accessibilityValue(file.date.formatted(date: .abbreviated, time: .standard))
+                        .accessibilityIdentifier("backup.local." + file.name)
+                    }
+                case .remote(let files):
+                    if files.isEmpty { Text("这个目录还没有备份。").foregroundStyle(.secondary) }
+                    ForEach(files) { file in
+                        Button { select(.backup(.remote(file))) } label: {
+                            backupLabel(name: file.name, date: file.date, size: file.size, legacy: file.isLegacySnapshot)
+                        }
+                        .accessibilityLabel(file.name)
+                        .accessibilityValue(file.date.formatted(date: .abbreviated, time: .standard))
+                        .accessibilityIdentifier("backup.remote." + file.name)
+                    }
+                case .file:
+                    EmptyView()
                 }
             }
-        } header: {
-            Text("云端备份（最新在前）")
+            .navigationTitle(presented.id == "local" ? "本机备份" : "云端备份")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { select(nil) }
+                }
+            }
         }
-        .disabled(work != nil)
     }
 
     private func backupLabel(name: String, date: Date, size: Int64?, legacy: Bool = false) -> some View {
@@ -301,9 +332,8 @@ struct WebDAVSyncView: View {
 
     private func didSynchronize(_ result: BackupSyncOutcome) throws {
         switch result {
-        case .uploaded:
-            history = nil
-            message = "已上传新的 ZIP 备份。"
+        case .uploaded(let file):
+            message = "已上传备份：\(file.name)"
         case .restored:
             try didRestore()
         case .unchanged:
@@ -361,18 +391,15 @@ struct WebDAVSyncView: View {
 
     private func didRestore() throws {
         account = try WebDAVAccount.load() ?? WebDAVAccount()
-        history = nil
-        localHistory = nil
         message = "备份已恢复。"
     }
 }
 
-private final class TemporaryBackup: Identifiable, Sendable {
-    let id = UUID()
+final class TemporaryBackup: Sendable {
     let url: URL
     let name: String
 
-    init(url: URL, name: String) {
+    private init(url: URL, name: String) {
         self.url = url
         self.name = name
     }
@@ -398,6 +425,12 @@ private final class TemporaryBackup: Identifiable, Sendable {
         if let error { throw error }
         guard let copyResult else { throw CocoaError(.fileReadUnknown) }
         try copyResult.get()
+        try Task.checkCancellation()
+        do {
+            _ = try LegadoDatabase.fullBackupFingerprint(at: target)
+        } catch {
+            throw SyncViewError("所选文件不是有效的阅读备份 ZIP。")
+        }
         try Task.checkCancellation()
         return copy
     }

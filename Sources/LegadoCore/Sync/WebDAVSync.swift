@@ -30,6 +30,7 @@ public enum WebDAVSyncDirection: Equatable, Sendable {
 public enum WebDAVSyncError: LocalizedError, Equatable {
     case invalidDirectory, invalidUsername, unauthorized, forbidden, missingDirectory
     case redirected, remoteChanged, missingStrongETag, unexpectedResponse
+    case uploadNotListed(String)
     case incompleteBackup(expected: Int64, received: UInt64)
     case httpStatus(Int)
 
@@ -44,6 +45,7 @@ public enum WebDAVSyncError: LocalizedError, Equatable {
         case .remoteChanged: "云端文件已发生变化，请重新同步。"
         case .missingStrongETag: "服务器未提供可用于安全覆盖的强 ETag。请稍后重试，也可以从云端下载。"
         case .unexpectedResponse: "服务器返回了意外内容，请检查 WebDAV 目录地址。"
+        case .uploadNotListed(let name): "服务器已接受上传，但备份目录里还找不到完整的 \(name)。请刷新云端列表，并检查目录权限和剩余空间。"
         case .incompleteBackup(let expected, let received): "下载文件长度与备份不一致（预期 \(expected) 字节，实际 \(received) 字节），请刷新备份列表后重试。"
         case .httpStatus(let code): "WebDAV 请求失败（HTTP \(code)）。"
         }
@@ -86,7 +88,8 @@ public final class WebDAVSync: Sendable {
         configuration.urlCredentialStorage = nil
         configuration.httpCookieStorage = nil
         configuration.urlCache = nil
-        session = URLSession(configuration: configuration, delegate: WebDAVSessionDelegate(), delegateQueue: nil)
+        let delegate = WebDAVSessionDelegate(directory: directory, username: username, password: password)
+        session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     }
 
     deinit { session.invalidateAndCancel() }
@@ -119,7 +122,7 @@ public final class WebDAVSync: Sendable {
             }
             return WebDAVRemoteSnapshot(data: data, etag: response.value(forHTTPHeaderField: "ETag"))
         default:
-            throw Self.error(response)
+            throw Self.error(response.statusCode)
         }
     }
 
@@ -148,7 +151,7 @@ public final class WebDAVSync: Sendable {
         case 404, 409:
             throw WebDAVSyncError.missingDirectory
         default:
-            throw Self.error(response)
+            throw Self.error(response.statusCode)
         }
     }
 
@@ -167,8 +170,17 @@ public final class WebDAVSync: Sendable {
     public func listBackups(includeOtherArchives: Bool = false) async throws -> [WebDAVBackupFile] {
         let query = directoryQuery(depth: 1)
         let (xml, response) = try await creatingDirectoryIfMissing { try await send(query) }
-        guard response.statusCode == 207 else { throw Self.error(response) }
+        guard response.statusCode == 207 else { throw Self.error(response.statusCode) }
         let entries = try WebDAVListing.parse(xml)
+        let needsCanonicalDirectory = entries.contains { entry in
+            guard entry.properties["collection"] == nil, let address = Self.encodedAddress(entry.href),
+                  let url = URL(string: address, relativeTo: directoryURL) else { return false }
+            return Self.isBackupName(url.lastPathComponent) && Self.backupName(href: entry.href, relativeTo: directoryURL) == nil
+        }
+        // A reverse proxy or DAV mount alias may expose the server's canonical paths in href.
+        // Confirm that identity with Depth: 0 before treating its direct children as ours.
+        // All actual downloads and uploads still use the configured directory and a safe basename.
+        let canonicalDirectory = needsCanonicalDirectory ? try await reportedDirectory() : nil
         var files: [String: WebDAVBackupFile] = [:]
         let httpDate = Self.dateFormatter("EEE, dd MMM yyyy HH:mm:ss zzz")
         let timestamp = Self.dateFormatter(Self.timestampFormat)
@@ -177,7 +189,8 @@ public final class WebDAVSync: Sendable {
         fractionalDate.formatOptions.insert(.withFractionalSeconds)
         for entry in entries {
             guard entry.properties["collection"] == nil,
-                  let name = backupName(href: entry.href),
+                  let name = Self.backupName(href: entry.href, relativeTo: directoryURL)
+                    ?? canonicalDirectory.flatMap({ Self.backupName(href: entry.href, relativeTo: $0) }),
                   includeOtherArchives || name == "legado-sync.json" || name.hasPrefix(Self.backupPrefix) else { continue }
             let modified = entry.properties["getlastmodified"].flatMap(httpDate.date(from:))
             let stamp = name.dropFirst(Self.backupPrefix.count).prefix(19)
@@ -197,7 +210,7 @@ public final class WebDAVSync: Sendable {
     }
 
     @discardableResult
-    public func uploadBackup(from file: URL) async throws -> WebDAVBackupFile {
+    public func uploadBackup(from file: URL, requireListing: Bool = false) async throws -> WebDAVBackupFile {
         let date = Date()
         let name = Self.newBackupName(at: date)
         let url = directoryURL.appendingPathComponent(name)
@@ -211,7 +224,7 @@ public final class WebDAVSync: Sendable {
         case 404, 409: try await createCollection(directoryURL)
         // A write-only DAV account may prohibit PROPFIND but still allow the conditional PUT.
         case 207, 403, 405, 501: break
-        default: throw Self.error(directory)
+        default: throw Self.error(directory.statusCode)
         }
         var put = request(method: "PUT", url: url)
         put.setValue("application/zip", forHTTPHeaderField: "Content-Type")
@@ -219,7 +232,7 @@ public final class WebDAVSync: Sendable {
         let (body, response) = try await creatingDirectoryIfMissing {
             try await perform { try await session.upload(for: put, fromFile: file) }
         }
-        guard [200, 201, 204].contains(response.statusCode) else { throw Self.error(response) }
+        guard [200, 201, 204].contains(response.statusCode) else { throw Self.error(response.statusCode) }
         let backup = WebDAVBackupFile(name: name, date: date, size: size,
                                       etag: response.value(forHTTPHeaderField: "ETag"), modified: nil)
         if Self.isHTML(response, data: body) {
@@ -230,6 +243,18 @@ public final class WebDAVSync: Sendable {
             guard FileManager.default.contentsEqual(atPath: file.path, andPath: copy.path) else {
                 throw WebDAVSyncError.unexpectedResponse
             }
+        }
+        if requireListing || [207, 404, 409].contains(directory.statusCode) {
+            // A successful PUT receipt alone does not guarantee the new ZIP is visible to Restore.
+            // Give an eventually consistent listing one more read without repeating the upload.
+            for attempt in 0...1 {
+                if attempt > 0 { try await Task.sleep(nanoseconds: 500_000_000) }
+                if let listed = try await listBackups().first(where: { $0.name == name }),
+                   listed.size == nil || listed.size == size {
+                    return listed
+                }
+            }
+            throw WebDAVSyncError.uploadNotListed(name)
         }
         return backup
     }
@@ -247,7 +272,7 @@ public final class WebDAVSync: Sendable {
         let (download, response) = try await perform { try await session.download(for: get) }
         defer { try? FileManager.default.removeItem(at: download) }
         guard response.statusCode != 404 else { throw WebDAVSyncError.remoteChanged }
-        guard response.statusCode == 200 else { throw Self.error(response) }
+        guard response.statusCode == 200 else { throw Self.error(response.statusCode) }
         let handle = try FileHandle(forReadingFrom: download)
         defer { try? handle.close() }
         let prefix = try handle.read(upToCount: 64) ?? Data()
@@ -285,7 +310,25 @@ public final class WebDAVSync: Sendable {
             component.rangeOfCharacter(from: .controlCharacters) == nil
     }
 
-    private func backupName(href: String) -> String? {
+    private func reportedDirectory() async throws -> URL? {
+        let (body, response) = try await send(directoryQuery(depth: 0))
+        guard response.statusCode == 207 else { return nil }
+        let entries = try WebDAVListing.parse(body)
+        guard entries.count == 1, let entry = entries.first, entry.properties["collection"] != nil,
+              let address = Self.encodedAddress(entry.href),
+              let absolute = URL(string: address, relativeTo: directoryURL)?.absoluteURL,
+              var parts = URLComponents(url: absolute, resolvingAgainstBaseURL: false),
+              ["http", "https"].contains(parts.scheme?.lowercased() ?? ""), parts.host != nil,
+              parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil else { return nil }
+        if !parts.percentEncodedPath.hasSuffix("/") { parts.percentEncodedPath += "/" }
+        return parts.url
+    }
+
+    private static func isBackupName(_ name: String) -> Bool {
+        name == "legado-sync.json" || name.lowercased().hasSuffix(".zip")
+    }
+
+    private static func backupName(href: String, relativeTo directoryURL: URL) -> String? {
         guard let address = Self.encodedAddress(href),
               let url = URL(string: address, relativeTo: directoryURL)?.absoluteURL,
               let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -299,7 +342,7 @@ public final class WebDAVSync: Sendable {
         let components = parts.percentEncodedPath.split(separator: "/").map { String($0).removingPercentEncoding }
         let parent = directory.percentEncodedPath.split(separator: "/").map { String($0).removingPercentEncoding }
         guard components.dropLast().elementsEqual(parent), let name = components.last ?? nil,
-              Self.isPathComponent(name), name == "legado-sync.json" || name.lowercased().hasSuffix(".zip") else { return nil }
+              Self.isPathComponent(name), Self.isBackupName(name) else { return nil }
         return name
     }
 
@@ -326,7 +369,7 @@ public final class WebDAVSync: Sendable {
             (_, response) = try await send(mkcol)
         }
         // RFC 4918 specifies 405 when the collection already exists (including a concurrent MKCOL).
-        guard [200, 201, 204, 405].contains(response.statusCode) else { throw Self.error(response) }
+        guard [200, 201, 204, 405].contains(response.statusCode) else { throw Self.error(response.statusCode) }
     }
 
     private func request(method: String, url: URL? = nil) -> URLRequest {
@@ -377,26 +420,43 @@ public final class WebDAVSync: Sendable {
         return data.first(where: { ![9, 10, 13, 32].contains($0) }) == 60
     }
 
-    private static func error(_ response: HTTPURLResponse) -> WebDAVSyncError {
-        switch response.statusCode {
+    fileprivate static func error(_ statusCode: Int) -> WebDAVSyncError {
+        switch statusCode {
         case 200..<300: .unexpectedResponse
         case 300..<400: .redirected
         case 401: .unauthorized
         case 403: .forbidden
         case 404, 409: .missingDirectory
         case 412: .remoteChanged
-        default: .httpStatus(response.statusCode)
+        default: .httpStatus(statusCode)
         }
     }
 }
 
 private final class WebDAVSessionDelegate: NSObject, URLSessionTaskDelegate {
+    private let directory: URL
+    private let username: String
+    private let password: String
+
+    init(directory: URL, username: String, password: String) {
+        self.directory = directory
+        self.username = username
+        self.password = password
+    }
+
     func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         switch challenge.protectionSpace.authenticationMethod {
         case NSURLAuthenticationMethodHTTPBasic, NSURLAuthenticationMethodHTTPDigest:
-            // Basic credentials, if configured, were sent with the original request.
-            completionHandler(.rejectProtectionSpace, nil)
+            let space = challenge.protectionSpace
+            let scheme = directory.scheme?.lowercased()
+            guard challenge.previousFailureCount == 0, !username.isEmpty, !space.isProxy(),
+                  space.host.lowercased() == directory.host?.lowercased(), space.protocol?.lowercased() == scheme,
+                  space.port == (directory.port ?? (scheme == "https" ? 443 : 80)) else {
+                completionHandler(.rejectProtectionSpace, nil)
+                return
+            }
+            completionHandler(.useCredential, URLCredential(user: username, password: password, persistence: .none))
         default:
             completionHandler(.performDefaultHandling, nil)
         }
@@ -421,7 +481,8 @@ private final class WebDAVListing: NSObject, XMLParserDelegate {
     private var path: [String] = []
     private var text = ""
     private var entry = Entry()
-    private var responseOK = true
+    private var responseStatus: Int?
+    private var firstFailure: Int?
     private var properties: [String: String] = [:]
     private var propertyOK = false
     private var foundMultistatus = false
@@ -433,6 +494,7 @@ private final class WebDAVListing: NSObject, XMLParserDelegate {
         parser.shouldResolveExternalEntities = false
         parser.delegate = delegate
         guard parser.parse(), delegate.foundMultistatus else { throw WebDAVSyncError.unexpectedResponse }
+        if delegate.entries.isEmpty, let failure = delegate.firstFailure { throw WebDAVSync.error(failure) }
         return delegate.entries
     }
 
@@ -446,7 +508,7 @@ private final class WebDAVListing: NSObject, XMLParserDelegate {
             foundMultistatus = true
         case ["multistatus", "response"]:
             entry = Entry()
-            responseOK = true
+            responseStatus = nil
         case ["multistatus", "response", "propstat"]:
             properties.removeAll(keepingCapacity: true)
             propertyOK = false
@@ -479,13 +541,16 @@ private final class WebDAVListing: NSObject, XMLParserDelegate {
         case ["multistatus", "response", "href"]:
             entry.href = value
         case ["multistatus", "response", "status"]:
-            responseOK = Self.succeeds(value)
+            responseStatus = readStatus(value)
         case ["multistatus", "response", "propstat", "status"]:
-            propertyOK = Self.succeeds(value)
+            propertyOK = (200..<300).contains(readStatus(value))
         case ["multistatus", "response", "propstat"]:
             if propertyOK { entry.properties.merge(properties) { _, new in new } }
         case ["multistatus", "response"]:
-            if responseOK, !entry.href.isEmpty, !entry.properties.isEmpty { entries.append(entry) }
+            if !entry.href.isEmpty,
+               responseStatus.map({ (200..<300).contains($0) }) ?? !entry.properties.isEmpty {
+                entries.append(entry)
+            }
         default:
             if path.dropLast().elementsEqual(["multistatus", "response", "propstat", "prop"]),
                let key = path.last, ["getetag", "getlastmodified", "creationdate", "getcontentlength", "resourcetype"].contains(key) {
@@ -496,9 +561,10 @@ private final class WebDAVListing: NSObject, XMLParserDelegate {
         text = ""
     }
 
-    private static func succeeds(_ status: String) -> Bool {
+    private func readStatus(_ status: String) -> Int {
         let fields = status.split(whereSeparator: \.isWhitespace)
-        guard fields.count >= 2, let code = Int(fields[1]) else { return false }
-        return (200..<300).contains(code)
+        guard fields.count >= 2, let code = Int(fields[1]) else { return 0 }
+        if firstFailure == nil, (400..<600).contains(code) { firstFailure = code }
+        return code
     }
 }

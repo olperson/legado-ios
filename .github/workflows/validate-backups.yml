@@ -123,15 +123,16 @@ jobs:
           fi
           echo "BACKUP_TEST_DEVICE=$device" >> "$GITHUB_ENV"
 
-      - name: Verify local backup history and Files ZIP restore on the iPhone
+      - name: Verify local, Files and WebDAV backup flows on the iPhone
         if: matrix.suite == 'iPhone'
         shell: bash
         env:
           SCHEME: LegadoReaderUITests
-          MINIMUM_TESTS: 2
+          MINIMUM_TESTS: 3
           TEST_CASES: >-
             ReaderScrollGestureTests/testLocalZIPBackupAndRestoreWithoutWebDAV
             ReaderScrollGestureTests/testLocalBackupHistoryRestoreWithoutWebDAV
+            ReaderScrollGestureTests/testWebDAVSyncShowsUploadedZIPInRemoteHistory
         run: &run_iphone_tests |
           set -euo pipefail
           result="$RUNNER_TEMP/$SCHEME.xcresult"

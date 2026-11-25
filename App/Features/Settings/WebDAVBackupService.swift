@@ -18,7 +18,7 @@ struct LocalBackupFile: Identifiable, Sendable {
 }
 
 enum BackupSyncOutcome {
-    case uploaded, restored, unchanged, conflict(BackupSyncConflict), legacyAvailable(WebDAVBackupFile)
+    case uploaded(WebDAVBackupFile), restored, unchanged, conflict(BackupSyncConflict), legacyAvailable(WebDAVBackupFile)
 }
 
 enum BackupServiceError: LocalizedError {
@@ -193,10 +193,10 @@ final class WebDAVBackupService: ObservableObject {
         }
     }
 
-    private func upload(_ local: Snapshot, to client: WebDAVSync, key: String) async throws -> BackupSyncOutcome {
-        let remote = try await client.uploadBackup(from: local.url)
+    private func upload(_ local: Snapshot, to client: WebDAVSync, key: String, requireListing: Bool = true) async throws -> BackupSyncOutcome {
+        let remote = try await client.uploadBackup(from: local.url, requireListing: requireListing)
         try record(local.fingerprint, remote, key: key)
-        return .uploaded
+        return .uploaded(remote)
     }
 
     private func download(_ remote: WebDAVBackupFile, from client: WebDAVSync, key: String,
@@ -295,7 +295,7 @@ final class WebDAVBackupService: ObservableObject {
                     try Task.checkCancellation()
                     guard let account = try WebDAVAccount.load() else { throw BackupServiceError.noAccount }
                     let client = try account.makeClient()
-                    _ = try await upload(local, to: client, key: accountKey(client, account))
+                    _ = try await upload(local, to: client, key: accountKey(client, account), requireListing: false)
                     didSave(.webDAV)
                 } catch { if firstError == nil { firstError = error } }
             }
