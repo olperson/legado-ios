@@ -59,7 +59,7 @@ jobs:
       matrix:
         suite: [core, iPhone]
     runs-on: macos-15-intel
-    timeout-minutes: 60
+    timeout-minutes: ${{ matrix.suite == 'iPhone' && 75 || 60 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -129,6 +129,8 @@ jobs:
         env:
           SCHEME: LegadoReaderUITests
           MINIMUM_TESTS: 3
+          # Files may traverse several provider screens on the Intel simulator.
+          TEST_ALLOWANCE: 600
           TEST_CASES: >-
             ReaderScrollGestureTests/testLocalZIPBackupAndRestoreWithoutWebDAV
             ReaderScrollGestureTests/testLocalBackupHistoryRestoreWithoutWebDAV
@@ -143,7 +145,7 @@ jobs:
           xcodebuild -project Legado.xcodeproj -scheme "$SCHEME" -configuration Debug \
             -destination "platform=iOS Simulator,id=$BACKUP_TEST_DEVICE" -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             -onlyUsePackageVersionsFromResolvedFile -parallel-testing-enabled NO \
-            -test-timeouts-enabled YES -default-test-execution-time-allowance 240 -maximum-test-execution-time-allowance 300 \
+            -test-timeouts-enabled YES -default-test-execution-time-allowance "$TEST_ALLOWANCE" -maximum-test-execution-time-allowance "$TEST_ALLOWANCE" \
             "${selectors[@]}" -resultBundlePath "$result" CODE_SIGN_IDENTITY=- test \
             2>&1 | tee -a "$RUNNER_TEMP/backup.log" || status=$?
           summary=$(xcrun xcresulttool get test-results summary --path "$result")
@@ -158,6 +160,7 @@ jobs:
         env:
           SCHEME: LegadoReaderTests
           MINIMUM_TESTS: 5
+          TEST_ALLOWANCE: 240
           TEST_CASES: WebDAVBackupIntegrationTests BackupSessionStateTests
         run: *run_iphone_tests
 
