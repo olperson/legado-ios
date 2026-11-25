@@ -450,7 +450,7 @@ private final class WebDAVSessionDelegate: NSObject, URLSessionTaskDelegate {
         case NSURLAuthenticationMethodHTTPBasic, NSURLAuthenticationMethodHTTPDigest:
             let space = challenge.protectionSpace
             let scheme = directory.scheme?.lowercased()
-            guard challenge.previousFailureCount == 0, !username.isEmpty, !space.isProxy(),
+            guard challenge.previousFailureCount == 0, !username.isEmpty, space.proxyType == nil,
                   space.host.lowercased() == directory.host?.lowercased(), space.protocol?.lowercased() == scheme,
                   space.port == (directory.port ?? (scheme == "https" ? 443 : 80)) else {
                 completionHandler(.rejectProtectionSpace, nil)
