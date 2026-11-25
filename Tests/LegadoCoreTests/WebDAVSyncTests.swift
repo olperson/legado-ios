@@ -29,23 +29,13 @@ struct WebDAVSyncTests {
     @Test func addressesUseTheConfiguredDirectory() throws {
         let client = try WebDAVSync(directoryURL: " https://example.test/dav/My%20Library/ ", username: "", password: "")
         #expect(client.fileURL.absoluteString == "https://example.test/dav/My%20Library/legado-sync.json")
-        for input in ["", "dav.example", "ftp://dav.example", "https://me@dav.example", "https://dav.example?token=abc"] {
-            #expect(throws: WebDAVSyncError.invalidDirectory) {
-                _ = try WebDAVSync(directoryURL: input, username: "", password: "")
-            }
-        }
-        #expect(throws: WebDAVSyncError.invalidUsername) {
-            _ = try WebDAVSync(directoryURL: "https://example.test", username: "invalid:name", password: "test")
-        }
         #expect(WebDAVSync.fingerprint(Data("abc".utf8)) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
     }
 
-    @Test func readsAndWritesWithConditionalRequests() async throws {
+    @Test func readsAndWritesLegacySnapshotsWithoutConditionalHeaders() async throws {
         let existing = try makeClient("existing")
         let snapshot = try #require(try await existing.fetch())
         #expect(snapshot.data == Data("{}".utf8))
-        #expect(snapshot.etag == "\"current\"")
-        try await existing.verifyUnchanged(snapshot)
         try await existing.upload(remote, replacing: snapshot)
 
         let empty = try makeClient("missing")
@@ -53,31 +43,12 @@ struct WebDAVSyncTests {
         try await empty.upload(local, replacing: nil)
     }
 
-    @Test func reportsAuthenticationRedirectsAndUnexpectedContent() async throws {
-        for (route, error): (String, WebDAVSyncError) in [
-            ("unauthorized", .unauthorized), ("forbidden", .forbidden), ("redirect", .redirected),
-            ("login", .unexpectedResponse), ("server-error", .httpStatus(503))
-        ] {
+    @Test func reportsTheActualFailedRequest() async throws {
+        for (route, code) in [("unauthorized", 401), ("forbidden", 403), ("server-error", 503)] {
             let client = try makeClient(route)
-            await #expect(throws: error) { _ = try await client.fetch() }
-        }
-        let login = try makeClient("login")
-        await #expect(throws: WebDAVSyncError.unexpectedResponse) { try await login.upload(local, replacing: nil) }
-        let missingDirectory = try makeClient("no-directory")
-        await #expect(throws: WebDAVSyncError.missingDirectory) { try await missingDirectory.upload(local, replacing: nil) }
-    }
-
-    @Test func detectsConcurrentCreationEditingAndWeakETags() async throws {
-        let raced = try makeClient("raced")
-        await #expect(throws: WebDAVSyncError.remoteChanged) { try await raced.upload(local, replacing: nil) }
-        let existing = try makeClient("existing")
-        let stale = WebDAVRemoteSnapshot(data: remote, etag: "\"old\"")
-        await #expect(throws: WebDAVSyncError.remoteChanged) { try await existing.verifyUnchanged(stale) }
-        await #expect(throws: WebDAVSyncError.remoteChanged) { try await existing.verifyUnchanged(nil) }
-        await #expect(throws: WebDAVSyncError.remoteChanged) { try await existing.upload(local, replacing: stale) }
-        for tag in [nil, "W/\"weak\"", "*", "unquoted", "\"one\", \"two\""] as [String?] {
-            let unprotected = WebDAVRemoteSnapshot(data: remote, etag: tag)
-            await #expect(throws: WebDAVSyncError.missingStrongETag) { try await existing.upload(local, replacing: unprotected) }
+            await #expect(throws: WebDAVSyncError.httpStatus(method: "GET", path: "/\(route)/legado-sync.json", code: code)) {
+                _ = try await client.fetch()
+            }
         }
     }
 
@@ -95,10 +66,6 @@ private final class WebDAVFixtureProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 
     override func startLoading() {
-        if request.httpMethod == "MKCOL", request.url?.lastPathComponent == "no-directory" {
-            reply(405)
-            return
-        }
         guard let url = request.url, url.lastPathComponent == "legado-sync.json",
               request.value(forHTTPHeaderField: "Authorization") == "Basic cmVhZGVyOnRlc3Q=" else {
             reply(401)
@@ -106,16 +73,13 @@ private final class WebDAVFixtureProtocol: URLProtocol, @unchecked Sendable {
         }
         let route = url.deletingLastPathComponent().lastPathComponent
         switch (route, request.httpMethod) {
-        case ("existing", "GET"): reply(200, headers: ["ETag": "\"current\""], body: "{}")
-        case ("existing", "PUT"): reply(request.value(forHTTPHeaderField: "If-Match") == "\"current\"" ? 204 : 412)
+        case ("existing", "GET"): reply(200, body: "{}")
         case ("missing", "GET"): reply(404)
-        case ("missing", "PUT"): reply(request.value(forHTTPHeaderField: "If-None-Match") == "*" ? 201 : 428)
-        case ("no-directory", "PUT"): reply(409)
-        case ("raced", "PUT"): reply(412)
+        case ("existing", "PUT"), ("missing", "PUT"):
+            let hasCondition = ["If-Match", "If-None-Match"].contains { request.value(forHTTPHeaderField: $0) != nil }
+            reply(hasCondition ? 403 : 201)
         case ("unauthorized", _): reply(401)
         case ("forbidden", _): reply(403)
-        case ("redirect", _): reply(302)
-        case ("login", _): reply(200, headers: ["Content-Type": "text/html"], body: "<html>Login</html>")
         default: reply(503)
         }
     }

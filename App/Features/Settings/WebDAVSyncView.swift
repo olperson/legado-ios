@@ -38,7 +38,7 @@ struct WebDAVSyncView: View {
     private enum Review {
         case local(TemporaryBackup)
         case onDevice(LocalBackupFile)
-        case remote(WebDAVBackupFile)
+        case remote(WebDAVBackupFile, isLatest: Bool)
         case conflict(BackupSyncConflict)
         case legacy(WebDAVBackupFile)
 
@@ -56,11 +56,11 @@ struct WebDAVSyncView: View {
                 "“\(file.name)”中的数据和设置将替换本机内容。"
             case .onDevice(let file):
                 "“\(file.name)”中的数据和设置将替换本机内容。"
-            case .remote(let file) where file.isLegacySnapshot:
+            case .remote(let file, _) where file.isLegacySnapshot:
                 "这是旧版同步文件。仅恢复在线书架、分组、进度、书源和书签，并替换本机对应的数据。"
-            case .remote(let file):
+            case .remote(let file, _):
                 "“\(file.name)”中的数据和设置将替换本机内容。"
-            case .conflict(let conflict) where !conflict.canRestoreRemote:
+            case .conflict(let conflict) where conflict.remote == nil:
                 "上次同步的云端备份已移除。可以重新上传本机内容，创建一份新备份。"
             case .legacy:
                 "可以先用旧版文件恢复在线书架、分组、进度、书源和书签，再创建完整 ZIP。也可以直接备份当前本机数据。旧版文件将继续保留。"
@@ -123,9 +123,9 @@ struct WebDAVSyncView: View {
         ), presenting: review) { selected in
             switch selected {
             case .conflict(let conflict):
-                Button("保留本机并上传") { resolve(conflict, preferLocal: true) }
-                if conflict.canRestoreRemote {
-                    Button("恢复云端版本", role: .destructive) { resolve(conflict, preferLocal: false) }
+                Button("保留本机并上传") { uploadLocal() }
+                if let remote = conflict.remote {
+                    Button("恢复云端版本", role: .destructive) { restore(.remote(remote, isLatest: true)) }
                 }
             case .legacy(let file):
                 Button("恢复旧版数据并备份为 ZIP", role: .destructive) { migrate(file, restoreFirst: true) }
@@ -141,17 +141,11 @@ struct WebDAVSyncView: View {
 
     private var connectionSection: some View {
         Section {
-            TextField("WebDAV 目录地址", text: Binding(get: { account.directory }, set: {
-                account.directory = $0
-                account.password = ""
-            }))
+            TextField("WebDAV 目录地址", text: $account.directory)
             .keyboardType(.URL)
             .textInputAutocapitalization(.never)
             .disableAutocorrection(true)
-            TextField("用户名", text: Binding(get: { account.username }, set: {
-                account.username = $0
-                account.password = ""
-            }))
+            TextField("用户名", text: $account.username)
             .textContentType(.username)
             .textInputAutocapitalization(.never)
             .disableAutocorrection(true)
@@ -160,13 +154,13 @@ struct WebDAVSyncView: View {
             Group {
                 Button("保存连接") {
                     do {
-                        _ = try savedClient()
+                        try account.save()
                         message = "WebDAV 连接已保存。"
                     } catch { message = error.localizedDescription }
                 }
                 Button("立即同步") {
                     perform("正在同步…") {
-                        _ = try savedClient()
+                        try account.save()
                         let result = try await WebDAVBackupService.shared.sync(database: database(), account: account)
                         try didSynchronize(result)
                     }
@@ -182,7 +176,7 @@ struct WebDAVSyncView: View {
         } header: {
             Text("WebDAV 服务器")
         } footer: {
-            Text("填写备份目录地址。同步时会自动创建缺少的目录，每次上传生成一个独立的 ZIP。")
+            Text("填写存放 ZIP 的目录地址，例如 https://服务器/dav/legado/。同步时会自动创建缺少的目录。")
         }
         .disabled(work != nil)
     }
@@ -260,8 +254,9 @@ struct WebDAVSyncView: View {
                     }
                 case .remote(let files):
                     if files.isEmpty { Text("这个目录还没有备份。").foregroundStyle(.secondary) }
+                    let latest = files.first(where: \.isSyncArchive)
                     ForEach(files) { file in
-                        Button { select(.backup(.remote(file))) } label: {
+                        Button { select(.backup(.remote(file, isLatest: file == latest))) } label: {
                             backupLabel(name: file.name, date: file.date, size: file.size, legacy: file.isLegacySnapshot)
                         }
                         .accessibilityLabel(file.name)
@@ -309,9 +304,6 @@ struct WebDAVSyncView: View {
 
     private func database() throws -> LegadoDatabase {
         guard let database = books.syncDatabase else { throw LibraryRestoreError.unavailable }
-        guard books.canRestoreSnapshot, sources.canRestoreSnapshot, activity.canRestoreSnapshot else {
-            throw LibraryRestoreError.busy
-        }
         return database
     }
 
@@ -321,11 +313,9 @@ struct WebDAVSyncView: View {
         return client
     }
 
-    private func resolve(_ conflict: BackupSyncConflict, preferLocal: Bool) {
-        perform("正在同步…") {
-            let result = try await WebDAVBackupService.shared.resolve(
-                conflict, preferLocal: preferLocal, database: database(), account: account
-            )
+    private func uploadLocal() {
+        perform("正在上传备份…") {
+            let result = try await WebDAVBackupService.shared.backUpToWebDAV(database: database(), account: account)
             try didSynchronize(result)
         }
     }
@@ -350,7 +340,7 @@ struct WebDAVSyncView: View {
             let db = try database()
             if restoreFirst { try await restoreLegacy(file, database: db) }
             do {
-                let result = try await WebDAVBackupService.shared.startZIPHistory(database: db, account: account, legacy: file)
+                let result = try await WebDAVBackupService.shared.backUpToWebDAV(database: db, account: account)
                 try didSynchronize(result)
             } catch where restoreFirst {
                 message = "已恢复旧版数据。创建 ZIP 备份失败：\(error.localizedDescription)"
@@ -377,12 +367,12 @@ struct WebDAVSyncView: View {
                 try await WebDAVBackupService.shared.restore(from: file.url, database: db)
             case .onDevice(let file):
                 try await WebDAVBackupService.shared.restore(from: file.url, database: db)
-            case .remote(let file) where file.isLegacySnapshot:
+            case .remote(let file, _) where file.isLegacySnapshot:
                 try await restoreLegacy(file, database: db)
                 message = "已从旧版同步文件恢复。"
                 return
-            case .remote(let file):
-                try await WebDAVBackupService.shared.restoreRemote(file, database: db, account: account)
+            case .remote(let file, let isLatest):
+                try await WebDAVBackupService.shared.restoreRemote(file, database: db, account: account, isLatest: isLatest)
             case .conflict, .legacy: return
             }
             try didRestore()

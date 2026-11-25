@@ -12,10 +12,15 @@ struct WebDAVBackupTransportTests {
     }
 
     @Test func createsMissingAncestorsAndRetriesTheOriginalOperation() async throws {
-        let client = try makeClient()
-        try await client.upload(Data("{}".utf8), replacing: nil)
-        let files = try await client.listBackups()
-        #expect(files.map(\.isLegacySnapshot).contains(true))
+        let client = try makeClient(mode: "missing")
+        #expect(try await client.listBackups().isEmpty)
+        #expect(BackupDAVProtocol.methods(for: client) == ["PROPFIND"])
+        let archive = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: archive) }
+        try BackupDAVProtocol.archive.write(to: archive)
+        let uploaded = try await client.uploadBackup(from: archive)
+        #expect(BackupDAVProtocol.methods(for: client) == ["PROPFIND", "PUT", "MKCOL", "MKCOL", "MKCOL", "PUT"])
+        #expect(try await client.listBackups().contains { $0.name == uploaded.name })
     }
 
     @Test func listsOnlyFilesInTheChosenDirectoryNewestFirst() async throws {
@@ -28,7 +33,8 @@ struct WebDAVBackupTransportTests {
         #expect(files[1].date > files[2].date)
         let manual = try await client.listBackups(includeOtherArchives: true)
         #expect(manual.map(\.name).contains("my-renamed-backup.zip"))
-        #expect(manual.count == files.count + 1)
+        #expect(manual.map(\.name).contains("no-metadata.zip"))
+        #expect(manual.count == files.count + 2)
     }
 
     @Test func writesIndependentArchivesWithoutOverwritingHistory() async throws {
@@ -47,6 +53,7 @@ struct WebDAVBackupTransportTests {
         let client = try makeClient(mode: "proxy")
         let files = try await client.listBackups()
         #expect(files.map(\.name) == [BackupDAVProtocol.recentName, BackupDAVProtocol.oldName])
+        #expect(BackupDAVProtocol.methods(for: client) == ["PROPFIND"])
         let archive = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: archive) }
         try BackupDAVProtocol.archive.write(to: archive)
@@ -54,36 +61,41 @@ struct WebDAVBackupTransportTests {
         #expect(try await client.listBackups().contains { $0.name == saved.name })
     }
 
-    @Test func reportsPutSuccessWhenHistoryNeverContainsTheZIPAsUnconfirmed() async throws {
-        let client = try makeClient(mode: "discard")
+    @Test func uploadsToAWriteOnlyDirectoryWithAnHTMLReceiptUsingOnePUT() async throws {
+        let client = try makeClient(mode: "writeonly")
+        let archive = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: archive) }
+        try BackupDAVProtocol.archive.write(to: archive)
+        let uploaded = try await client.uploadBackup(from: archive)
+        #expect(uploaded.name.hasSuffix(".zip"))
+        #expect(BackupDAVProtocol.methods(for: client) == ["PUT"])
+    }
+
+    @Test func reportsTheServerStatusWhenPUTIsForbidden() async throws {
+        let client = try makeClient(mode: "readonly")
         let archive = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: archive) }
         try BackupDAVProtocol.archive.write(to: archive)
         do {
             _ = try await client.uploadBackup(from: archive)
-            Issue.record("A successful PUT alone must not report that the ZIP is restorable.")
-        } catch WebDAVSyncError.uploadNotListed(let name) {
-            #expect(name.hasPrefix("legado-ios-") && name.hasSuffix(".zip"))
+            Issue.record("PUT should have returned HTTP 403.")
+        } catch WebDAVSyncError.httpStatus(let method, let path, let code) {
+            #expect(method == "PUT")
+            #expect(code == 403)
+            #expect(path.contains("/Backups/legado-ios-") && path.hasSuffix(".zip"))
         }
-    }
-
-    @Test func manualSyncStillChecksHistoryIfDepthZeroIsUnsupported() async throws {
-        let client = try makeClient(mode: "discard-no-depth-zero")
-        let archive = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: archive) }
-        try BackupDAVProtocol.archive.write(to: archive)
-        #expect(try await !client.listBackups().isEmpty)
-        do {
-            _ = try await client.uploadBackup(from: archive, requireListing: true)
-            Issue.record("A readable Depth: 1 history must contain the uploaded ZIP even when Depth: 0 is unavailable.")
-        } catch WebDAVSyncError.uploadNotListed(let name) {
-            #expect(name.hasSuffix(".zip"))
-        }
+        #expect(BackupDAVProtocol.methods(for: client) == ["PUT"])
     }
 
     @Test func reportsDeniedDirectoryInsideMultiStatus() async throws {
         let client = try makeClient(mode: "denied")
-        await #expect(throws: WebDAVSyncError.forbidden) { try await client.listBackups() }
+        do {
+            _ = try await client.listBackups()
+            Issue.record("PROPFIND reported HTTP 403 for the configured directory.")
+        } catch WebDAVSyncError.httpStatus(let method, _, let code) {
+            #expect(method == "PROPFIND")
+            #expect(code == 403)
+        }
     }
 
     private func makeClient(mode: String = "plain") throws -> WebDAVSync {
@@ -103,6 +115,19 @@ private final class BackupDAVProtocol: URLProtocol, @unchecked Sendable {
         private let lock = NSLock()
         private var created: Set<URL> = []
         private var saved: [URL: Set<String>] = [:]
+        private var methodsByHost: [String: [String]] = [:]
+
+        func record(_ request: URLRequest) {
+            lock.lock()
+            defer { lock.unlock() }
+            methodsByHost[request.url!.host!, default: []].append(request.httpMethod!)
+        }
+
+        func methods(for host: String) -> [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return methodsByHost[host] ?? []
+        }
 
         func store(_ file: URL) {
             lock.lock()
@@ -127,11 +152,15 @@ private final class BackupDAVProtocol: URLProtocol, @unchecked Sendable {
         func has(_ folder: URL) -> Bool {
             lock.lock()
             defer { lock.unlock() }
-            return created.contains(folder)
+            return !folder.host!.hasPrefix("missing-") || created.contains(folder)
         }
     }
 
     private static let folders = Collections()
+
+    static func methods(for client: WebDAVSync) -> [String] {
+        folders.methods(for: client.fileURL.host!)
+    }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -143,30 +172,38 @@ private final class BackupDAVProtocol: URLProtocol, @unchecked Sendable {
             reply(401)
             return
         }
+        Self.folders.record(request)
+        if url.host!.hasPrefix("writeonly-"), request.httpMethod != "PUT" {
+            reply(403)
+            return
+        }
         switch request.httpMethod {
         case "MKCOL":
             reply(Self.folders.create(url))
         case "PROPFIND":
             guard Self.folders.has(url) else { reply(404); return }
-            if url.host?.hasPrefix("discard-no-depth-zero-") == true, request.value(forHTTPHeaderField: "Depth") == "0" {
-                reply(405)
-                return
-            }
-            guard ["0", "1"].contains(request.value(forHTTPHeaderField: "Depth") ?? "") else { reply(400); return }
-            let xml = Self.listing(host: url.host!, depth: request.value(forHTTPHeaderField: "Depth"),
+            guard request.value(forHTTPHeaderField: "Depth") == "1" else { reply(403); return }
+            let xml = Self.listing(host: url.host!,
                                    names: Self.folders.names(in: url))
             reply(207, body: Data(xml.utf8), type: "application/xml")
         case "PUT":
             guard Self.folders.has(url.deletingLastPathComponent()) else { reply(409); return }
-            guard request.value(forHTTPHeaderField: "If-None-Match") == "*" else { reply(428); return }
-            if url.pathExtension == "zip", !(url.host?.hasPrefix("discard-") ?? false) { Self.folders.store(url) }
-            reply(201)
+            if url.host!.hasPrefix("readonly-") || request.value(forHTTPHeaderField: "If-None-Match") != nil {
+                reply(403)
+                return
+            }
+            if url.pathExtension == "zip" { Self.folders.store(url) }
+            if url.host!.hasPrefix("writeonly-") {
+                reply(201, body: Data("<html>Created</html>".utf8), type: "text/html")
+            } else {
+                reply(201)
+            }
         default:
             reply(405)
         }
     }
 
-    private static func listing(host: String, depth: String?, names: [String]) -> String {
+    private static func listing(host: String, names: [String]) -> String {
         func entry(_ href: String, type: String = "", status: Int = 200) -> String {
             """
             <d:response><d:href>\(href)</d:href>
@@ -182,7 +219,6 @@ private final class BackupDAVProtocol: URLProtocol, @unchecked Sendable {
         if host.hasPrefix("denied-") {
             return #"<d:multistatus xmlns:d="DAV:"><d:response><d:href>/dav/My%20Books/Backups/</d:href><d:status>HTTP/1.1 403 Forbidden</d:status></d:response></d:multistatus>"#
         }
-        if depth == "0" { return "<d:multistatus xmlns:d=\"DAV:\">" + collection + "</d:multistatus>" }
         let saved = names.map { entry(directory + $0) }.joined()
         if host.hasPrefix("proxy-") {
             return """
@@ -202,9 +238,10 @@ private final class BackupDAVProtocol: URLProtocol, @unchecked Sendable {
         \(entry("https://unrelated.test/dav/My%20Books/Backups/legado-ios-elsewhere.zip"))
         \(entry("../legado-ios-parent.zip"))
         \(entry("legado-ios-collection.zip", type: "<d:collection/>"))
-        \(entry("legado-ios-deleted.zip", status: 404))
+        <d:response><d:href>legado-ios-deleted.zip</d:href><d:status>HTTP/1.1 404 Not Found</d:status></d:response>
         \(entry("unrelated.txt"))
         \(entry("my-renamed-backup.zip"))
+        \(entry("no-metadata.zip", status: 404))
         </d:multistatus>
         """
     }

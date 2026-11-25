@@ -93,12 +93,11 @@ final class WebDAVBackupIntegrationTests: XCTestCase {
             return XCTFail("两端都改动时应让用户选择")
         }
         XCTAssertEqual(conflict.remoteName, second.name)
-        guard case .restored = try await service.resolve(conflict, preferLocal: false, database: database, account: account) else {
-            return XCTFail("选择云端应恢复最新书架")
-        }
+        let selected = try XCTUnwrap(conflict.remote)
+        try await service.restoreRemote(selected, database: database, account: account, isLatest: true)
         let synced = try await database.loadBooks()
         XCTAssertEqual(synced.map(\.name), [otherBook.name])
-        try await service.restoreRemote(first, database: database, account: account)
+        try await service.restoreRemote(first, database: database, account: account, isLatest: false)
         let historical = try await database.loadBooks()
         XCTAssertEqual(historical.map(\.name), [firstBook.name])
         guard case .conflict = try await service.sync(database: database, account: account) else {
@@ -106,6 +105,36 @@ final class WebDAVBackupIntegrationTests: XCTestCase {
         }
         let history = try await client.listBackups()
         XCTAssertEqual(history.map(\.name), [second.name, first.name])
+    }
+
+    func testSyncUploadsCompleteBackupToWriteOnlyDirectory() async throws {
+        let port = try XCTUnwrap(ProcessInfo.processInfo.environment["LEGADO_TEST_DAV_PORT"])
+        let server = "http://127.0.0.1:\(port)"
+        let account = WebDAVAccount(directory: server + "/upload-only/")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let library = try LegadoDatabase(url: root.appendingPathComponent("library/legado.sqlite3"))
+        let fresh = try LegadoDatabase(url: root.appendingPathComponent("fresh/legado.sqlite3"))
+        let book = Book(bookUrl: "https://example.org/upload-only", name: "只写目录备份", author: "")
+        try await library.replaceBooks([book])
+        let service = WebDAVBackupService()
+
+        guard case .uploaded(let uploaded) = try await service.sync(database: library, account: account) else {
+            return XCTFail("只写目录应能上传备份")
+        }
+        do {
+            _ = try await account.makeClient().listBackups(includeOtherArchives: true)
+            XCTFail("只写目录不能列出可恢复的备份")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("403"), error.localizedDescription)
+            XCTAssertTrue(error.localizedDescription.contains("PROPFIND"), error.localizedDescription)
+        }
+
+        // The fixture exposes the same files to a reader at a separate URL.
+        let reader = WebDAVAccount(directory: server + "/dav/inbox/")
+        try await service.restoreRemote(uploaded, database: fresh, account: reader, isLatest: true)
+        let restored = try await fresh.loadBooks()
+        XCTAssertEqual(restored.map(\.bookUrl), [book.bookUrl])
     }
 
     func testRejectsNonBackupZIPWithoutReplacingTheShelf() async throws {

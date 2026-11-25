@@ -9,8 +9,10 @@ from wsgidav.wsgidav_app import WsgiDAVApp
 
 root = Path(sys.argv[1])
 root.mkdir()
+inbox = root / "inbox"
+inbox.mkdir()
 app = WsgiDAVApp({
-    "provider_mapping": {"/dav": str(root)},
+    "provider_mapping": {"/dav": str(root), "/upload-only": str(inbox)},
     "simple_dc": {"user_mapping": {"*": True}},
     "verbose": 0,
     "logging": {"enable": False},
@@ -24,6 +26,10 @@ def trace(environ, start_response):
         print(environ["REQUEST_METHOD"], environ["PATH_INFO"], condition, status, metadata, flush=True)
         return start_response(status, headers, exc_info)
 
+    path = environ["PATH_INFO"]
+    if (path == "/upload-only" or path.startswith("/upload-only/")) and environ["REQUEST_METHOD"] != "PUT":
+        record("403 Forbidden", [("Content-Length", "0")])
+        return [b""]
     return app(environ, record)
 
 

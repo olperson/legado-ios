@@ -2,10 +2,7 @@ import Foundation
 import SwiftUI
 
 struct BackupSyncConflict {
-    fileprivate let accountKey: String
-    fileprivate let localFingerprint: String
-    fileprivate let remote: WebDAVBackupFile?
-    var canRestoreRemote: Bool { remote != nil }
+    let remote: WebDAVBackupFile?
     var remoteName: String { remote?.name ?? "已移除的备份" }
 }
 
@@ -22,13 +19,12 @@ enum BackupSyncOutcome {
 }
 
 enum BackupServiceError: LocalizedError {
-    case busy, noAccount, changed, pendingSession
+    case busy, noAccount, pendingSession
     var errorDescription: String? {
         switch self {
         case .busy: "另一个备份或恢复操作正在进行，请稍后重试。"
         case .noAccount: "请先保存 WebDAV 连接。"
         case .pendingSession: "书架和文件已恢复。连接和登录状态会在下次解锁并打开应用时继续恢复。"
-        case .changed: "本机或远端备份已更改，请重新同步。"
         }
     }
 }
@@ -134,99 +130,71 @@ final class WebDAVBackupService: ObservableObject {
         UserDefaults.standard.set(data, forKey: key)
     }
 
-    private func latest(_ client: WebDAVSync) async throws -> WebDAVBackupFile? {
-        try await client.listBackups().first { !$0.isLegacySnapshot }
-    }
-
     func sync(database: LegadoDatabase, account: WebDAVAccount) async throws -> BackupSyncOutcome {
-        try await exclusively { try await synchronize(database, account: account, resolution: nil) }
-    }
-
-    func resolve(_ conflict: BackupSyncConflict, preferLocal: Bool,
-                 database: LegadoDatabase, account: WebDAVAccount) async throws -> BackupSyncOutcome {
         try await exclusively {
-            try await synchronize(database, account: account, resolution: (conflict, preferLocal))
+            let client = try account.makeClient()
+            let key = accountKey(client, account)
+            let local = try await snapshot(database)
+            defer { try? FileManager.default.removeItem(at: local.url) }
+
+            let files: [WebDAVBackupFile]
+            do {
+                files = try await client.listBackups()
+            } catch let error as WebDAVSyncError where [403, 405, 501].contains(error.statusCode ?? 0) {
+                // A write-only inbox can accept a new ZIP but cannot compare versions.
+                return try await upload(local, to: client, key: key)
+            }
+            let base = baseline(key)
+            guard let remote = files.first(where: \.isSyncArchive) else {
+                if base != nil { return .conflict(BackupSyncConflict(remote: nil)) }
+                if let legacy = files.first(where: { $0.isLegacySnapshot }) { return .legacyAvailable(legacy) }
+                return try await upload(local, to: client, key: key)
+            }
+            if base?.remote == remote.name {
+                if base?.local == local.fingerprint { return .unchanged }
+                return try await upload(local, to: client, key: key)
+            }
+            if base?.local == local.fingerprint {
+                return try await download(remote, from: client, key: key, database: database)
+            }
+            return .conflict(BackupSyncConflict(remote: remote))
         }
     }
 
-    private func synchronize(_ database: LegadoDatabase, account: WebDAVAccount,
-                             resolution: (BackupSyncConflict, Bool)?) async throws -> BackupSyncOutcome {
-        let client = try account.makeClient()
-        let key = accountKey(client, account)
-        let local = try await snapshot(database)
-        defer { try? FileManager.default.removeItem(at: local.url) }
-        let files = try await client.listBackups()
-        let remote = files.first { !$0.isLegacySnapshot }
-        let base = baseline(key)
-        let conflict = BackupSyncConflict(accountKey: key, localFingerprint: local.fingerprint, remote: remote)
-        if let (previous, preferLocal) = resolution {
-            guard previous.accountKey == key, previous.localFingerprint == local.fingerprint,
-                  previous.remote == remote else { throw BackupServiceError.changed }
-            if preferLocal { return try await upload(local, to: client, key: key) }
-            guard let remote else { throw BackupServiceError.changed }
-            return try await download(remote, from: client, key: key, database: database, expected: local.fingerprint)
-        }
-        guard let remote else {
-            if base != nil { return .conflict(conflict) }
-            if let legacy = files.first(where: { $0.isLegacySnapshot }) { return .legacyAvailable(legacy) }
-            return try await upload(local, to: client, key: key)
-        }
-        if base?.remote == remote.name {
-            if base?.local == local.fingerprint { return .unchanged }
-            return try await upload(local, to: client, key: key)
-        }
-        if base?.local == local.fingerprint {
-            return try await download(remote, from: client, key: key, database: database, expected: local.fingerprint)
-        }
-        return .conflict(conflict)
-    }
-
-    func startZIPHistory(database: LegadoDatabase, account: WebDAVAccount,
-                         legacy: WebDAVBackupFile) async throws -> BackupSyncOutcome {
+    func backUpToWebDAV(database: LegadoDatabase, account: WebDAVAccount) async throws -> BackupSyncOutcome {
         try await exclusively {
             let client = try account.makeClient()
             let local = try await snapshot(database)
             defer { try? FileManager.default.removeItem(at: local.url) }
-            let files = try await client.listBackups()
-            guard legacy.isLegacySnapshot, files == [legacy] else { throw BackupServiceError.changed }
             return try await upload(local, to: client, key: accountKey(client, account))
         }
     }
 
-    private func upload(_ local: Snapshot, to client: WebDAVSync, key: String, requireListing: Bool = true) async throws -> BackupSyncOutcome {
-        let remote = try await client.uploadBackup(from: local.url, requireListing: requireListing)
+    private func upload(_ local: Snapshot, to client: WebDAVSync, key: String) async throws -> BackupSyncOutcome {
+        let remote = try await client.uploadBackup(from: local.url)
         try record(local.fingerprint, remote, key: key)
         return .uploaded(remote)
     }
 
     private func download(_ remote: WebDAVBackupFile, from client: WebDAVSync, key: String,
-                          database: LegadoDatabase, expected: String?) async throws -> BackupSyncOutcome {
+                          database: LegadoDatabase, isLatest: Bool = true) async throws -> BackupSyncOutcome {
         let file = Self.temporaryZIP()
         defer { try? FileManager.default.removeItem(at: file) }
         try await client.downloadBackup(remote, to: file)
-        if let expected {
-            let current = try await snapshot(database)
-            defer { try? FileManager.default.removeItem(at: current.url) }
-            guard current.fingerprint == expected, try await latest(client) == remote else { throw BackupServiceError.changed }
-        }
         try await install(file, database: database)
-        // A completed restore must remain a success even if disk space no longer
-        // permits an additional temporary archive for the synchronization baseline.
         UserDefaults.standard.removeObject(forKey: key)
-        // A historical restore is an explicit local choice. Ask before the next
-        // sync would replace it with a newer version from the same directory.
-        if expected == nil, (try? await latest(client))?.name != remote.name { return .restored }
-        if let restored = try? await snapshot(database) {
+        if isLatest, let restored = try? await snapshot(database) {
             defer { try? FileManager.default.removeItem(at: restored.url) }
             try record(restored.fingerprint, remote, key: key)
         }
         return .restored
     }
 
-    func restoreRemote(_ backup: WebDAVBackupFile, database: LegadoDatabase, account: WebDAVAccount) async throws {
+    func restoreRemote(_ backup: WebDAVBackupFile, database: LegadoDatabase, account: WebDAVAccount, isLatest: Bool) async throws {
         try await exclusively {
             let client = try account.makeClient()
-            _ = try await download(backup, from: client, key: accountKey(client, account), database: database, expected: nil)
+            _ = try await download(backup, from: client, key: accountKey(client, account),
+                                   database: database, isLatest: isLatest)
         }
     }
 
@@ -295,7 +263,7 @@ final class WebDAVBackupService: ObservableObject {
                     try Task.checkCancellation()
                     guard let account = try WebDAVAccount.load() else { throw BackupServiceError.noAccount }
                     let client = try account.makeClient()
-                    _ = try await upload(local, to: client, key: accountKey(client, account), requireListing: false)
+                    _ = try await upload(local, to: client, key: accountKey(client, account))
                     didSave(.webDAV)
                 } catch { if firstError == nil { firstError = error } }
             }
