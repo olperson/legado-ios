@@ -8,6 +8,8 @@ struct WebDAVSyncView: View {
     @EnvironmentObject private var sources: SourceLibraryModel
     @EnvironmentObject private var activity: ReadingActivityModel
 
+    private enum ConnectionField { case directory, username, password }
+    @FocusState private var focusedField: ConnectionField?
     @State private var account = WebDAVAccount()
     @State private var loadedAccount = false
     @State private var work: String?
@@ -20,13 +22,14 @@ struct WebDAVSyncView: View {
     @State private var review: Review?
 
     private enum BackupSheet: Identifiable {
-        case local([LocalBackupFile]), remote([WebDAVBackupFile], WebDAVSync), file
+        case local([LocalBackupFile]), remote([WebDAVBackupFile], WebDAVSync), file, tools
 
         var id: String {
             switch self {
             case .local: "local"
             case .remote: "remote"
             case .file: "file"
+            case .tools: "tools"
             }
         }
     }
@@ -71,12 +74,7 @@ struct WebDAVSyncView: View {
     }
 
     var body: some View {
-        Form {
-            connectionSection
-            localSection
-            WebDAVAutoBackupSection()
-        }
-        .safeAreaInset(edge: .top, spacing: 0) {
+        VStack(spacing: 0) {
             if let work {
                 HStack {
                     ProgressView()
@@ -89,9 +87,15 @@ struct WebDAVSyncView: View {
                 Text(message)
                     .accessibilityIdentifier("backup.status")
                     .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal).padding(.vertical, 8)
                     .background(.bar)
+            }
+            Form {
+                connectionSection
+                localSection
+                WebDAVAutoBackupSection()
             }
         }
         .navigationTitle("备份与恢复")
@@ -108,6 +112,8 @@ struct WebDAVSyncView: View {
             handleSelectionWhenReady()
         }) { presented in
             switch presented {
+            case .tools:
+                connectionTools
             case .file:
                 ReadingImportPicker.backup(directoryURL: try? WebDAVBackupService.localBackupDirectory()) { file in
                     select(.file(file))
@@ -147,6 +153,7 @@ struct WebDAVSyncView: View {
         Section {
             HStack {
                 TextField("WebDAV 目录地址", text: $account.directory)
+                    .focused($focusedField, equals: .directory)
                     .keyboardType(.URL)
                     .textInputAutocapitalization(.never)
                     .disableAutocorrection(true)
@@ -167,10 +174,12 @@ struct WebDAVSyncView: View {
                 .buttonStyle(.borderless)
             }
             TextField("用户名", text: $account.username)
-            .textContentType(.username)
-            .textInputAutocapitalization(.never)
-            .disableAutocorrection(true)
+                .focused($focusedField, equals: .username)
+                .textContentType(.username)
+                .textInputAutocapitalization(.never)
+                .disableAutocorrection(true)
             SecureField("密码或应用专用密码", text: $account.password)
+                .focused($focusedField, equals: .password)
                 .textContentType(.password)
             Group {
                 Button("保存连接") {
@@ -187,28 +196,8 @@ struct WebDAVSyncView: View {
                     }
                 }
                 Button("从 WebDAV 选择备份恢复") { openRemoteHistory() }
-                Menu("连接工具") {
-                    Button("测试连接") {
-                        perform("正在连接目录…") {
-                            try await connectionClient().checkConnection()
-                            message = "已连接到 WebDAV 目录。"
-                        }
-                    }
-                    Button("查看服务器支持的方法") {
-                        perform("正在查询服务器方法…") {
-                            let methods = try await connectionClient().allowedMethods()
-                            message = methods.isEmpty ? "服务器没有在 OPTIONS 响应中列出方法。"
-                                : "服务器声明支持：" + methods.joined(separator: "、")
-                        }
-                    }
-                    Button("创建此备份目录") {
-                        perform("正在创建备份目录…") {
-                            try await connectionClient().createBackupDirectory()
-                            message = "备份目录已就绪。"
-                        }
-                    }
-                }
-                .accessibilityIdentifier("backup.connection.tools")
+                Button("连接工具") { present(.tools) }
+                    .accessibilityIdentifier("backup.connection.tools")
             }
             .disabled(account.directory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } header: {
@@ -217,6 +206,43 @@ struct WebDAVSyncView: View {
             Text("可直接输入主机名，或从地址模板选择服务。已有备份时请填写原目录。")
         }
         .disabled(work != nil)
+    }
+
+    private var connectionTools: some View {
+        ReadingNavigationStack {
+            List {
+                Button("测试连接") {
+                    select(nil)
+                    perform("正在连接目录…") {
+                        try await connectionClient().checkConnection()
+                        message = "已连接到 WebDAV 目录。"
+                    }
+                }
+                .accessibilityIdentifier("backup.tools.check")
+                Button("查看服务器支持的方法") {
+                    select(nil)
+                    perform("正在查询服务器方法…") {
+                        let methods = try await connectionClient().allowedMethods()
+                        message = methods.isEmpty ? "服务器没有在 OPTIONS 响应中列出方法。"
+                            : "服务器声明支持：" + methods.joined(separator: "、")
+                    }
+                }
+                Button("创建此备份目录") {
+                    select(nil)
+                    perform("正在创建备份目录…") {
+                        try await connectionClient().createBackupDirectory()
+                        message = "备份目录已就绪。"
+                    }
+                }
+            }
+            .navigationTitle("连接工具")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { select(nil) }
+                }
+            }
+        }
     }
 
     private var localSection: some View {
@@ -247,6 +273,7 @@ struct WebDAVSyncView: View {
     }
 
     private func present(_ next: BackupSheet) {
+        focusedField = nil
         selection = nil
         sheetHasDismissed = false
         sheet = next
@@ -309,6 +336,7 @@ struct WebDAVSyncView: View {
 
     private func perform(_ description: String, _ action: @escaping @MainActor () async throws -> Void) {
         guard work == nil else { return }
+        focusedField = nil
         work = description
         message = nil
         Task {
